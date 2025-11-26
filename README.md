@@ -104,7 +104,7 @@ Follow these steps to set up and run Project AirSim from source:
     ```
   - **Windows** (use "x64 Native Tools Command Prompt for VS 2022"):
     ```cmd
-    build.bat simlibs_debug
+    build.cmd simlibs_debug
     ```
 
 ### 4. Generate Project Files
