@@ -1,0 +1,463 @@
+{
+  "scan_parameters": {
+    "area_x": 10,
+    "area_y": 10,
+    "z_min": -20,
+    "z_max": -2,
+    "resolution_xy": 5,
+    "resolution_z": 3,
+    "timestamp": "20260106_183938",
+    "safety": {
+      "safe_distance": 8.0,
+      "warn_distance": 5.0,
+      "stop_distance": 3.0
+    }
+  },
+  "statistics": {
+    "total_points": 24,
+    "obstacles": 0,
+    "free": 24,
+    "inaccessible": 0,
+    "skipped": 0
+  },
+  "volume_map": [
+    [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ]
+  ],
+  "x_points": [
+    -5.0,
+    0.0
+  ],
+  "y_points": [
+    -5.0,
+    0.0
+  ],
+  "z_points": [
+    -20,
+    -17,
+    -14,
+    -11,
+    -8,
+    -5
+  ],
+  "positions": [
+    {
+      "target": {
+        "x": -5.0,
+        "y": -5.0,
+        "z": -20.0
+      },
+      "actual": {
+        "x": -5.051582336425781,
+        "y": -5.0516676902771,
+        "z": -19.2032470703125
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 31.84375
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": -5.0,
+        "z": -20.0
+      },
+      "actual": {
+        "x": -0.3977947533130646,
+        "y": -4.999104976654053,
+        "z": -20.003690719604492
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": null
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": 0.0,
+        "z": -20.0
+      },
+      "actual": {
+        "x": -4.536731719970703,
+        "y": -0.3723166286945343,
+        "z": -20.049062728881836
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.90625
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -20.0
+      },
+      "actual": {
+        "x": -0.48556604981422424,
+        "y": 0.18435588479042053,
+        "z": -20.240549087524414
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": null
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": -5.0,
+        "z": -17.0
+      },
+      "actual": {
+        "x": -4.719967365264893,
+        "y": -4.769286155700684,
+        "z": -17.34264373779297
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.578125
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": -5.0,
+        "z": -17.0
+      },
+      "actual": {
+        "x": -0.4486691653728485,
+        "y": -5.186662673950195,
+        "z": -17.216001510620117
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": null
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": 0.0,
+        "z": -17.0
+      },
+      "actual": {
+        "x": -4.631201267242432,
+        "y": -0.2795428931713104,
+        "z": -17.123043060302734
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.515625
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -17.0
+      },
+      "actual": {
+        "x": -0.4474249482154846,
+        "y": 0.1991519033908844,
+        "z": -17.207304000854492
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": null
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": -5.0,
+        "z": -14.0
+      },
+      "actual": {
+        "x": -4.761434078216553,
+        "y": -4.798587799072266,
+        "z": -14.793468475341797
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.421875
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": -5.0,
+        "z": -14.0
+      },
+      "actual": {
+        "x": -0.7188116908073425,
+        "y": -4.9922871589660645,
+        "z": -14.01101016998291
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.34375
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": 0.0,
+        "z": -14.0
+      },
+      "actual": {
+        "x": -4.474346160888672,
+        "y": -0.5917118787765503,
+        "z": -13.7626953125
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.15625
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -14.0
+      },
+      "actual": {
+        "x": -0.39736810326576233,
+        "y": 0.026514869183301926,
+        "z": -14.08215045928955
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": null
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": -5.0,
+        "z": -11.0
+      },
+      "actual": {
+        "x": -4.673402786254883,
+        "y": -4.758837699890137,
+        "z": -11.385588645935059
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.328125
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": -5.0,
+        "z": -11.0
+      },
+      "actual": {
+        "x": -0.472646027803421,
+        "y": -5.192174911499023,
+        "z": -11.224733352661133
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.140625
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": 0.0,
+        "z": -11.0
+      },
+      "actual": {
+        "x": -4.484730243682861,
+        "y": -0.4773562550544739,
+        "z": -10.846735000610352
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.171875
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -11.0
+      },
+      "actual": {
+        "x": -0.73409503698349,
+        "y": -0.008373802527785301,
+        "z": -10.770442962646484
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.421875
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": -5.0,
+        "z": -8.0
+      },
+      "actual": {
+        "x": -4.8825788497924805,
+        "y": -4.875001430511475,
+        "z": -8.858189582824707
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.53125
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": -5.0,
+        "z": -8.0
+      },
+      "actual": {
+        "x": -0.7570956945419312,
+        "y": -4.981290340423584,
+        "z": -8.036528587341309
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.40625
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": 0.0,
+        "z": -8.0
+      },
+      "actual": {
+        "x": -4.509210109710693,
+        "y": -0.5873731374740601,
+        "z": -7.769191265106201
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.25
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -8.0
+      },
+      "actual": {
+        "x": -0.7454759478569031,
+        "y": -0.02488558180630207,
+        "z": -7.753701686859131
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.5
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": -5.0,
+        "z": -5.0
+      },
+      "actual": {
+        "x": -4.849899768829346,
+        "y": -4.832383155822754,
+        "z": -5.910501956939697
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 27.5625
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": -5.0,
+        "z": -5.0
+      },
+      "actual": {
+        "x": -0.7429449558258057,
+        "y": -4.982240200042725,
+        "z": -5.059668064117432
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.375
+    },
+    {
+      "target": {
+        "x": -5.0,
+        "y": 0.0,
+        "z": -5.0
+      },
+      "actual": {
+        "x": -4.734167575836182,
+        "y": -0.30290016531944275,
+        "z": -5.037379264831543
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 19.09375
+    },
+    {
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -5.0
+      },
+      "actual": {
+        "x": -0.467416375875473,
+        "y": 0.21097232401371002,
+        "z": -5.18116569519043
+      },
+      "accessible": true,
+      "obstacle": false,
+      "obstacle_dist": 23.5625
+    }
+  ]
+}
