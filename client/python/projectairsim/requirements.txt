@@ -1,7 +1,4 @@
-# Install packages for setting up a development environment
 wheel
 pytest
 pytest-cov
-
-# Install projectairsim package in editable development mode
--e .
+-e C:/CORTEXIS/ProjectAirSim/client/python/projectairsim

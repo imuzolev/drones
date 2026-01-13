@@ -1,114 +1,114 @@
-# Welcome to Project AirSim
+# Добро пожаловать в Project AirSim
 
-Project AirSim is a simulation platform for drones, robots, and other autonomous systems.
+Project AirSim — это платформа симуляции для дронов, роботов и других автономных систем.
 
-Building on the previous work of **[AirSim](https://github.com/microsoft/AirSim)**, it leverages **[Unreal Engine 5](https://www.unrealengine.com/)** to provide photo-realistic visuals, while providing the simulation framework needed to integrate custom physics, controllers, actuators, and sensors to develop an autonomous system.
+Основываясь на предыдущей работе **[AirSim](https://github.com/microsoft/AirSim)**, она использует **[Unreal Engine 5](https://www.unrealengine.com/)** для обеспечения фотореалистичной визуализации, предоставляя при этом фреймворк симуляции, необходимый для интеграции пользовательской физики, контроллеров, приводов и датчиков для разработки автономной системы.
 
-**IAMAI Simulations** is composed of former engineers from the original AirSim project at Microsoft, who have decided to continue its development after Microsoft discontinued the project. With their expertise, the team is committed to advancing the platform and fostering innovation in autonomous systems.
+**IAMAI Simulations** состоит из бывших инженеров оригинального проекта AirSim в Microsoft, которые решили продолжить его разработку после того, как Microsoft прекратила проект. Благодаря их опыту, команда стремится продвигать платформу и способствовать инновациям в автономных системах.
 
-Project AirSim consists of three main layers:
+Project AirSim состоит из трех основных слоев:
 
-1. **Project AirSim Sim Libs** - Base infrastructure for defining a generic robot structure and simulation scene tick loop
+1. **Project AirSim Sim Libs** — базовая инфраструктура для определения общей структуры робота и цикла обновления сцены симуляции
 
-2. **Project AirSim Plugin** - Host package (currently an Unreal Plugin) that builds on the sim libs to connect external components (controller, physics, rendering) at runtime that are specific to each configured robot-type scenario (ex. quadrotor drones)
+2. **Project AirSim Plugin** — хост-пакет (в настоящее время плагин Unreal), который строится на основе sim libs для подключения внешних компонентов (контроллер, физика, рендеринг) во время выполнения, специфичных для каждого настроенного сценария типа робота (например, квадрокоптеры)
 
-3. **Project AirSim Client Library** - End-user library to enable API calls to interact with the robot and simulation over a network connection
+3. **Project AirSim Client Library** — библиотека для конечных пользователей, позволяющая выполнять API-вызовы для взаимодействия с роботом и симуляцией через сетевое соединение
 
-For more details on the architecture, see **[Project AirSim Architecture Overview](docs/development/use_source.md#airsim-v-next-architecture-overview)**.
+Для получения более подробной информации об архитектуре см. **[Обзор архитектуры Project AirSim](docs/development/use_source.md#airsim-v-next-architecture-overview)**.
 
-Project AirSim currently supports Windows 11 and Ubuntu 22. For more info about hardware specs for working with Project AirSim, see **[System Specifications](docs/system_specs.md)**.
+Project AirSim в настоящее время поддерживает Windows 11 и Ubuntu 22. Для получения дополнительной информации о технических характеристиках оборудования для работы с Project AirSim см. **[Системные требования](docs/system_specs.md)**.
 
-![Drone flying in Urban environment](docs/images/airtaxi_in_dynamic_city.jpg)
+![Дрон, летящий в городской среде](docs/images/airtaxi_in_dynamic_city.jpg)
 
-## Open Source Commitment
+## Приверженность открытому исходному коду
 
-We believe that open-source is the best way to foster innovation and collaboration in robotics simulation. Project AirSim can only thrive if it's built together — not by a single corporation, but by all of us.
+Мы считаем, что открытый исходный код — лучший способ способствовать инновациям и сотрудничеству в симуляции робототехники. Project AirSim может процветать только если он создается вместе — не одной корпорацией, а всеми нами.
 
-We invite you to become part of this journey: contribute code, share feedback, report issues, and help shape the future of the platform.
+Мы приглашаем вас стать частью этого путешествия: вносить код, делиться отзывами, сообщать о проблемах и помогать формировать будущее платформы.
 
-## Enterprise Support
+## Корпоративная поддержка
 
-IAMAI Simulations offers professional **Enterprise Support** for teams and organizations building on Project AirSim.
+IAMAI Simulations предлагает профессиональную **корпоративную поддержку** для команд и организаций, работающих на базе Project AirSim.
 
-Whether you're working on large-scale simulations, custom features, or integration into your existing stack, we can help you move faster and with confidence.
+Работаете ли вы над крупномасштабными симуляциями, пользовательскими функциями или интеграцией в существующий стек, мы можем помочь вам двигаться быстрее и с уверенностью.
 
-**To learn more, visit [iamaisim.com](https://www.iamaisim.com).**
+**Чтобы узнать больше, посетите [iamaisim.com](https://www.iamaisim.com).**
 
-## Support the Project
+## Поддержка проекта
 
-Maintaining and improving a project of this scale requires significant effort and resources. If you or your organization benefit from Project AirSim, consider contributing by:
+Поддержание и улучшение проекта такого масштаба требует значительных усилий и ресурсов. Если вы или ваша организация получаете пользу от Project AirSim, рассмотрите возможность внесения вклада:
 
-- Sharing feedback and reporting issues  
-- Contributing code or documentation  
-- Collaborating on new features  
+- Делитесь отзывами и сообщайте о проблемах  
+- Вносите код или документацию  
+- Сотрудничайте над новыми функциями  
 
-Your involvement helps us improve the platform and foster a thriving community.
+Ваше участие помогает нам улучшать платформу и способствовать процветанию сообщества.
 
-## Join the Community
+## Присоединяйтесь к сообществу
 
-We believe that collaboration is key to building a thriving ecosystem around Project AirSim. Join our growing community to share ideas, ask questions, and collaborate with other developers and enthusiasts:
+Мы считаем, что сотрудничество является ключом к построению процветающей экосистемы вокруг Project AirSim. Присоединяйтесь к нашему растущему сообществу, чтобы делиться идеями, задавать вопросы и сотрудничать с другими разработчиками и энтузиастами:
 
-- **Discord**: Connect with us on our official Discord server for real-time discussions, support, and updates. [Join here](https://discord.gg/XprQ2w64uj).
-- **GitHub Discussions**: Participate in discussions, share feedback, and contribute to shaping the future of Project AirSim. [Start a discussion](https://github.com/iamaisim/ProjectAirSim/discussions).
+- **Discord**: Свяжитесь с нами на нашем официальном сервере Discord для обсуждений в реальном времени, поддержки и обновлений. [Присоединиться здесь](https://discord.gg/XprQ2w64uj).
+- **GitHub Discussions**: Участвуйте в обсуждениях, делитесь отзывами и вносите вклад в формирование будущего Project AirSim. [Начать обсуждение](https://github.com/iamaisim/ProjectAirSim/discussions).
 
-We look forward to hearing from you and building the future of autonomous systems together!
+Мы с нетерпением ждем ваших сообщений и совместного построения будущего автономных систем!
 
-## What's New
+## Что нового
 
-For a complete list of changes, view our **[Changelog](docs/changelog.md)**.
+Для полного списка изменений см. наш **[Журнал изменений](docs/changelog.md)**.
 
-## Roadmap and Collaboration
+## Дорожная карта и сотрудничество
 
-Our project's roadmap and future direction are defined through GitHub issues and discussions. Issues or discussions labeled **roadmap** or **need help** outline planned features and areas where community contributions are encouraged. We invite you to participate and help shape the future of Project AirSim.
+Дорожная карта проекта и будущее направление определяются через GitHub issues и обсуждения. Issues или обсуждения с метками **roadmap** или **need help** описывают запланированные функции и области, где поощряются вклады сообщества. Мы приглашаем вас участвовать и помогать формировать будущее Project AirSim.
 
-## Getting Started
+## Начало работы
 
-See **[Installing system prerequisites](docs/system_specs.md#installing-system-prerequisites)** for information about Windows/Linux system setup needed before running Project AirSim.
+См. **[Установка системных предварительных требований](docs/system_specs.md#installing-system-prerequisites)** для получения информации о настройке системы Windows/Linux, необходимой перед запуском Project AirSim.
 
-### 1. Pre-built environment binaries
+### 1. Предварительно собранные бинарные файлы окружения
 
-> I just want to download and run a Project AirSim environment and drive it with some Python code.
+> Я просто хочу скачать и запустить окружение Project AirSim и управлять им с помощью кода Python.
 
-*Note:* You can either build Project AirSim from source or download pre-built binaries to use with the Python client.
+*Примечание:* Вы можете либо собрать Project AirSim из исходного кода, либо скачать предварительно собранные бинарные файлы для использования с клиентом Python.
 
-#### **[Use pre-built binary environments](docs/development/use_prebuilt.md)**
+#### **[Использование предварительно собранных бинарных окружений](docs/development/use_prebuilt.md)**
 
-### 2. Develop with Project AirSim source
+### 2. Разработка с исходным кодом Project AirSim
 
-> I'm going to build the sim libs, Plugin, Blocks, and my own UE project environment from the ground up so I can customize it to my application.
+> Я собираюсь собрать sim libs, Plugin, Blocks и собственное окружение проекта UE с нуля, чтобы настроить его под свое приложение.
 
-#### **[Build from source as a developer](docs/development/use_source.md)**
+#### **[Сборка из исходного кода как разработчик](docs/development/use_source.md)**
 
-## Quick Start: Run from Source
+## Быстрый старт: Запуск из исходного кода
 
-Follow these steps to set up and run Project AirSim from source:
+Выполните следующие шаги для настройки и запуска Project AirSim из исходного кода:
 
-### 1. Install Unreal Engine 5.2
-- Download and install **[Unreal Engine 5.2](https://www.unrealengine.com/en-US/download)**.
-- Set the `UE_ROOT` environment variable to the Unreal Engine installation path:
+### 1. Установка Unreal Engine 5.2
+- Скачайте и установите **[Unreal Engine 5.2](https://www.unrealengine.com/en-US/download)**.
+- Установите переменную окружения `UE_ROOT` на путь установки Unreal Engine:
   ```bash
   export UE_ROOT=/path/to/UnrealEngine
   ```
 
-### 2. Install Dependencies (Linux Only)
-- Run the setup script to install required development tools:
+### 2. Установка зависимостей (только Linux)
+- Запустите скрипт установки для установки необходимых инструментов разработки:
   ```bash
   ./setup_linux_dev_tools.sh
   ```
 
-### 3. Build Simulation Libraries
-- Build the simulation libraries in debug mode:
+### 3. Сборка библиотек симуляции
+- Соберите библиотеки симуляции в режиме отладки:
   - **Linux/macOS**:
     ```bash
     ./build.sh simlibs_debug
     ```
-  - **Windows** (use "x64 Native Tools Command Prompt for VS 2022"):
+  - **Windows** (используйте "x64 Native Tools Command Prompt for VS 2022"):
     ```cmd
     build.cmd simlibs_debug
     ```
 
-### 4. Generate Project Files
-- Generate Visual Studio Code project files:
+### 4. Генерация файлов проекта
+- Сгенерируйте файлы проекта Visual Studio Code:
   - **Linux/macOS**:
     ```bash
     ./blocks_genprojfiles_vscode.sh
@@ -118,48 +118,48 @@ Follow these steps to set up and run Project AirSim from source:
     blocks_genprojfiles_vscode.bat
     ```
 
-### 5. Open and Run the Editor
-- Open the generated workspace in Visual Studio Code.
-- Launch the Unreal Engine editor in DebugGame mode.
+### 5. Открытие и запуск редактора
+- Откройте сгенерированное рабочее пространство в Visual Studio Code.
+- Запустите редактор Unreal Engine в режиме DebugGame.
 
-Once the editor is running, you can explore and interact with the simulation environment.
+После запуска редактора вы можете исследовать и взаимодействовать с окружением симуляции.
 
-## Running Headless (Docker)
+## Запуск без графического интерфейса (Docker)
 
-If you need to run a Project AirSim simulation on a headless system, such as in a Docker container, you can enable off-screen rendering by adding the `-RenderOffScreen` argument when launching the Unreal environment executable:
+Если вам нужно запустить симуляцию Project AirSim на системе без графического интерфейса, например, в контейнере Docker, вы можете включить рендеринг вне экрана, добавив аргумент `-RenderOffScreen` при запуске исполняемого файла окружения Unreal:
 
 ```
 Blocks{.exe/.sh} -RenderOffScreen
 ```
 
-If you are running without GPU access and want to run without any image rendering, you can disable rendering completely by adding the `-nullrhi` argument:
+Если вы запускаете без доступа к GPU и хотите запустить без какого-либо рендеринга изображений, вы можете полностью отключить рендеринг, добавив аргумент `-nullrhi`:
 
 ```
 Blocks{.exe/.sh} -nullrhi
 ```
 
-These arguments can also be used while debugging in VS Code by modifying the `launch.json` file, or in Visual Studio 2022 by modifying the project's `Configuration Properties`. See **[Running Headless (Docker, Azure Cloud)](docs/development/headless_cloud.md)** for more details.
+Эти аргументы также можно использовать при отладке в VS Code, изменив файл `launch.json`, или в Visual Studio 2022, изменив `Configuration Properties` проекта. См. **[Запуск без графического интерфейса (Docker, Azure Cloud)](docs/development/headless_cloud.md)** для получения более подробной информации.
 
-## Reference
+## Справочник
 
-### Configuration JSONC Settings
+### Настройки конфигурации JSONC
 
-- **[Overview](docs/config.md)**
-- **[Scene Settings](docs/config_scene.md)**
-- **[Robot Settings](docs/config_robot.md)**
+- **[Обзор](docs/config.md)**
+- **[Настройки сцены](docs/config_scene.md)**
+- **[Настройки робота](docs/config_robot.md)**
 
-### Client API
+### Клиентский API
 
-- **[Overall API Info](docs/api.md)**
+- **[Общая информация об API](docs/api.md)**
 
 
-## Transitioning from AirSim
+## Переход с AirSim
 
-See **[Transitioning from AirSim](docs/transition_from_airsim.md)** for guidance on converting an AirSim Unreal environment and client code from AirSim to Project AirSim.
+См. **[Переход с AirSim](docs/transition_from_airsim.md)** для получения руководства по преобразованию окружения AirSim Unreal и клиентского кода из AirSim в Project AirSim.
 
-## License
+## Лицензия
 
-Please see the [License page](docs/license.md) for Project AirSim license information.
+Пожалуйста, см. [Страницу лицензии](docs/license.md) для получения информации о лицензии Project AirSim.
 
 ---
 

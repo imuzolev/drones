@@ -695,7 +695,8 @@ Kinematics FastPhysicsModel::CalcNextKinematicsWithCollision(
 
   kin_with_collision.pose.position =
       collision_info.position +
-      (collision_info.normal * collision_info.penetration_depth) +
+      (collision_info.normal * (collision_info.penetration_depth +
+                                FastPhysicsBody::kCollisionOffset)) +
       (kin_with_collision.twist.linear * dt_sec);
 
   kin_with_collision.pose.orientation = cur_kin.pose.orientation;

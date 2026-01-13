@@ -366,6 +366,7 @@ docs/README.md
 
 # virtualenv
 env/
+venv/
 
 # client library dev install
 **/projectairsim.egg-info/
