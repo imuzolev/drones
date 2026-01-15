@@ -725,19 +725,60 @@ def _generate_lawnmower_waypoints(
 ) -> List[Tuple[float, float]]:
     """
     Генерирует точки "газонокосилки" от (start_n,start_e) по прямоугольнику extent_n x extent_e.
+    Создает полный паттерн с промежуточными точками вдоль каждого ряда для полного покрытия.
     """
     waypoints: List[Tuple[float, float]] = []
+    
+    # Количество рядов (проходов по East) - определяет, сколько раз дрон пройдет по East
     rows = max(1, int(math.ceil(abs(extent_e) / max(step_e, 1.0))))
-    e0 = start_e
+    
+    # Границы области
     n_min = start_n
     n_max = start_n + float(extent_n)
-    # чередуем направление проходов по N
+    e_min = start_e
+    e_max = start_e + float(extent_e)
+    
+    # Шаг между точками вдоль каждого ряда (по North) - делаем плотнее для полного покрытия
+    # Используем меньший шаг для более плавного движения
+    step_n = min(step_e, 3.0)  # Шаг не более 3 метров для плотного покрытия
+    
+    print(f"[lawnmower] Генерация waypoints: область {extent_n}м x {extent_e}м, шаг между рядами {step_e}м, шаг вдоль ряда {step_n}м")
+    print(f"[lawnmower] Границы: N=[{n_min:.1f}, {n_max:.1f}], E=[{e_min:.1f}, {e_max:.1f}], рядов: {rows+1}")
+    
+    # Генерируем waypoints для каждого ряда
     for i in range(rows + 1):
-        e = e0 + (i * (extent_e / max(rows, 1)))
-        if i % 2 == 0:
-            waypoints.append((n_max, e))
+        # Текущая координата East для этого ряда
+        if rows > 0:
+            e = e_min + (i * (extent_e / rows))
         else:
-            waypoints.append((n_min, e))
+            e = e_min
+        e = max(e_min, min(e, e_max))  # Ограничиваем границами
+        
+        # Определяем направление движения по North для этого ряда
+        # Четные ряды: от n_min к n_max, нечетные: от n_max к n_min
+        if i % 2 == 0:
+            # Движение от n_min к n_max
+            n_start = n_min
+            n_end = n_max
+        else:
+            # Движение от n_max к n_min
+            n_start = n_max
+            n_end = n_min
+        
+        # Количество точек вдоль этого ряда - обеспечиваем плотное покрытие
+        n_points = max(2, int(math.ceil(abs(extent_n) / step_n)) + 1)
+        
+        # Генерируем точки вдоль ряда
+        for j in range(n_points):
+            # Интерполируем от n_start к n_end
+            if n_points > 1:
+                alpha = j / (n_points - 1)
+            else:
+                alpha = 0.0
+            n = n_start + alpha * (n_end - n_start)
+            waypoints.append((n, e))
+    
+    print(f"[lawnmower] Создано {len(waypoints)} waypoints")
     return waypoints
 
 
@@ -1581,6 +1622,723 @@ async def explore_area_reactive(
     with contextlib.suppress(Exception):
         hover_task = await drone.hover_async()
         await hover_task
+
+
+async def explore_forward_only(
+    drone: Drone,
+    lidar_latest: LidarLatest,
+    pose_latest: PoseLatest,
+    imu_latest: ImuLatest,
+    lio_slam: SimpleLIO,
+    extent_n: float,
+    extent_e: float,
+    z: float,
+    cruise_speed: float,
+    dt: float,
+    avoid_dist: float,
+    max_yaw_rate: float,
+    total_timeout_sec: float,
+) -> None:
+    """
+    Алгоритм ПОЛНОГО исследования карты с систематическим покрытием.
+    
+    Дрон выполняет:
+    1. Паттерн "газонокосилки" (змейка) для полного покрытия области
+    2. Сканирование на нескольких высотах (от низкой к высокой)
+    3. Повороты на 360° в ключевых точках для полного охвата лидаром
+    4. Автоматическое избегание препятствий
+    
+    SLAM карта строится автоматически через лидар со всех сторон.
+    
+    Args:
+        drone: Объект дрона
+        lidar_latest: Последние данные лидара
+        pose_latest: Последняя поза дрона
+        imu_latest: Последние данные IMU
+        lio_slam: Объект LIO-SLAM для точной навигации
+        extent_n: Размер области по North (м)
+        extent_e: Размер области по East (м)
+        z: Базовая высота полета (NED, отрицательное = вверх)
+        cruise_speed: Крейсерская скорость (м/с)
+        dt: Шаг управления (сек)
+        avoid_dist: Дистанция срабатывания уклонения (м)
+        max_yaw_rate: Максимальная скорость рыскания (рад/с)
+        total_timeout_sec: Общий таймаут исследования (сек)
+    """
+    # === ПАРАМЕТРЫ ПОЛНОГО СКАНИРОВАНИЯ ===
+    # Адаптивный шаг между проходами - для маленьких областей делаем плотнее
+    base_lane_step = 8.0
+    # Если область меньше 20м, уменьшаем шаг для лучшего покрытия
+    if extent_e < 20.0:
+        lane_step = min(base_lane_step, extent_e / 2.0, 4.0)  # Минимум 2 ряда, максимум шаг 4м
+    else:
+        lane_step = base_lane_step
+    lane_step = max(2.0, lane_step)  # Минимальный шаг 2м для обеспечения покрытия
+    heights = [z, z - 2.0, z - 4.0, z + 2.0]  # Высоты сканирования (NED)
+    scan_rotation_degrees = 360.0  # Полный оборот для сканирования
+    scan_rotation_speed = math.pi / 2  # 90 град/сек - скорость вращения
+    waypoint_arrive_tol = 3.0  # Допуск достижения waypoint (м)
+    scan_pause = 0.5  # Пауза для накопления данных лидара (сек)
+    
+    # Ждём позицию из actual_pose
+    start_n = 0.0
+    start_e = 0.0
+    t_wait = time.time()
+    while True:
+        pose_msg, _ts = pose_latest.snapshot()
+        if pose_msg is not None and isinstance(pose_msg, dict):
+            pos = pose_msg.get("position", {})
+            start_n = float(pos.get("x", 0.0))
+            start_e = float(pos.get("y", 0.0))
+            break
+        if time.time() - t_wait > 5.0:
+            kin = drone.get_ground_truth_kinematics()
+            pos = kin["pose"]["position"]
+            start_n = float(pos["x"])
+            start_e = float(pos["y"])
+            break
+        await asyncio.sleep(0.05)
+
+    t0 = time.time()
+    
+    print("[forward_only] ========================================")
+    print("[forward_only] ПОЛНОЕ СКАНИРОВАНИЕ КАРТЫ")
+    print(f"[forward_only] Область: {extent_n}м x {extent_e}м")
+    print(f"[forward_only] Высоты сканирования: {heights}")
+    print(f"[forward_only] Шаг между проходами: {lane_step}м")
+    print("[forward_only] ========================================")
+    
+    # Генерируем waypoints для паттерна "газонокосилки"
+    waypoints = _generate_lawnmower_waypoints(
+        start_n=start_n - extent_n / 2,  # Начинаем от края области
+        start_e=start_e - extent_e / 2,
+        extent_n=extent_n,
+        extent_e=extent_e,
+        step_e=lane_step,
+    )
+    
+    total_waypoints = len(waypoints)
+    total_heights = len(heights)
+    print(f"[forward_only] Создано {total_waypoints} waypoints для каждой высоты")
+    print(f"[forward_only] Всего проходов: {total_waypoints * total_heights}")
+    
+    # === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: Поворот на 360° для полного сканирования ===
+    async def do_full_scan_rotation(current_height: float):
+        """Выполняет полный оборот на 360° для сканирования со всех сторон."""
+        print(f"[forward_only] 🔄 Выполняем поворот на {scan_rotation_degrees}° для полного сканирования...")
+        
+        rotation_duration = scan_rotation_degrees / (scan_rotation_speed * 180 / math.pi)
+        rotation_steps = int(rotation_duration / dt) + 1
+        
+        for _ in range(rotation_steps):
+            # Проверяем таймаут
+            if time.time() - t0 >= total_timeout_sec:
+                return
+            
+            cmd = await drone.move_by_velocity_body_frame_z_async(
+                v_forward=0.0,
+                v_right=0.0,
+                z=current_height,
+                duration=dt,
+                yaw_is_rate=True,
+                yaw=scan_rotation_speed,  # Вращаемся против часовой стрелки
+            )
+            await cmd
+            await asyncio.sleep(0.01)
+        
+        # Пауза для накопления данных лидара
+        await asyncio.sleep(scan_pause)
+        print(f"[forward_only] ✅ Поворот завершен")
+    
+    # === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: Движение к waypoint с избеганием препятствий ===
+    async def navigate_to_waypoint(target_n: float, target_e: float, target_z: float, wp_timeout: float = 60.0) -> bool:
+        """
+        Навигация к waypoint с избеганием препятствий.
+        Возвращает True если достигли цели, False если таймаут или общий таймаут.
+        """
+        wp_start = time.time()
+        stuck_counter = 0
+        last_dist = float('inf')
+        
+        while time.time() - wp_start < wp_timeout:
+            # Проверяем общий таймаут
+            if time.time() - t0 >= total_timeout_sec:
+                return False
+            
+            pose_msg, _pose_ts = pose_latest.snapshot()
+            if pose_msg is None:
+                await asyncio.sleep(0.05)
+                continue
+            
+            # Получаем данные IMU и LiDAR для LIO-SLAM
+            imu_orientation, imu_angular_velocity, imu_linear_acceleration, imu_time = imu_latest.snapshot()
+            lidar_pts, lidar_time = lidar_latest.snapshot()
+            
+            # Обновляем LIO-SLAM состояние
+            lio_state = lio_slam.update_state(
+                imu_orientation=imu_orientation,
+                imu_angular_velocity=imu_angular_velocity,
+                imu_linear_acceleration=imu_linear_acceleration,
+                imu_time=imu_time,
+                lidar_points=lidar_pts,
+                pose_gt=pose_msg,
+                lidar_time=lidar_time,
+            )
+            
+            # Используем позицию из LIO-SLAM для более точной навигации
+            pos = pose_msg.get("position", {}) if isinstance(pose_msg, dict) else {}
+            ori = pose_msg.get("orientation", {}) if isinstance(pose_msg, dict) else {}
+            
+            # Смешиваем позицию LIO-SLAM с ground truth
+            lio_pos = lio_state.get("position", [0.0, 0.0, 0.0])
+            gt_n = float(pos.get("x", lio_pos[0]))
+            gt_e = float(pos.get("y", lio_pos[1]))
+            
+            alpha_lio = 0.7
+            cur_n = alpha_lio * lio_pos[0] + (1.0 - alpha_lio) * gt_n
+            cur_e = alpha_lio * lio_pos[1] + (1.0 - alpha_lio) * gt_e
+            
+            # Используем ориентацию из LIO-SLAM или ground truth
+            lio_ori = lio_state.get("orientation", ori if isinstance(ori, dict) else {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0})
+            yaw = _quat_to_yaw_rad(lio_ori)
+            
+            # Вычисляем расстояние до цели
+            dn = target_n - cur_n
+            de = target_e - cur_e
+            dist = math.hypot(dn, de)
+            
+            # Проверяем, достигли ли waypoint
+            if dist < waypoint_arrive_tol:
+                return True
+            
+            # Проверяем на застревание
+            if abs(dist - last_dist) < 0.1:
+                stuck_counter += 1
+                if stuck_counter > 50:  # ~5 секунд без движения
+                    print(f"[forward_only] ⚠️ Застряли! Пропускаем waypoint")
+                    return True  # Продолжаем к следующему
+            else:
+                stuck_counter = 0
+            last_dist = dist
+            
+            # Вычисляем направление к цели
+            target_yaw = math.atan2(de, dn)
+            yaw_error = target_yaw - yaw
+            # Нормализуем угол в диапазон [-pi, pi]
+            while yaw_error > math.pi:
+                yaw_error -= 2 * math.pi
+            while yaw_error < -math.pi:
+                yaw_error += 2 * math.pi
+            
+            pts, _ts = lidar_latest.snapshot()
+            
+            # Если нет данных лидара - продолжаем движение с осторожностью
+            if pts is None or getattr(pts, "size", 0) == 0:
+                speed = cruise_speed * 0.5
+                if abs(yaw_error) > 0.3:
+                    # Сначала поворачиваемся к цели
+                    v_fwd_cmd = 0.0
+                    yaw_rate_cmd = _clamp(yaw_error * 2.0, -max_yaw_rate, max_yaw_rate)
+                else:
+                    v_fwd_cmd = speed
+                    yaw_rate_cmd = _clamp(yaw_error * 1.0, -max_yaw_rate * 0.5, max_yaw_rate * 0.5)
+                
+                cmd = await drone.move_by_velocity_body_frame_z_async(
+                    v_forward=v_fwd_cmd,
+                    v_right=0.0,
+                    z=target_z,
+                    duration=dt,
+                    yaw_is_rate=True,
+                    yaw=yaw_rate_cmd,
+                )
+                await cmd
+                await asyncio.sleep(0.01)
+                continue
+            
+            # Проверяем препятствия
+            front_min = _min_range_in_cone(pts, az_min_rad=-math.radians(45), az_max_rad=math.radians(45), max_range=999.0)
+            left_min = _min_range_in_cone(pts, az_min_rad=math.radians(30), az_max_rad=math.radians(90), max_range=999.0)
+            right_min = _min_range_in_cone(pts, az_min_rad=-math.radians(90), az_max_rad=-math.radians(30), max_range=999.0)
+            
+            # Проверка на опасность столкновения ножек
+            gear_collision_danger = _check_landing_gear_collision(pts, landing_gear_height=0.5, safety_margin=1.5)
+            
+            # КРИТИЧЕСКАЯ ОПАСНОСТЬ - экстренная остановка
+            if front_min < 1.5 or gear_collision_danger:
+                print(f"[forward_only] 🚨 КРИТИЧЕСКАЯ ОПАСНОСТЬ ({front_min:.1f}м)! Экстренный маневр!")
+                # Отступаем и поднимаемся
+                cmd = await drone.move_by_velocity_body_frame_z_async(
+                    v_forward=-cruise_speed * 0.5,
+                    v_right=0.0,
+                    z=target_z - 2.0,
+                    duration=0.5,
+                    yaw_is_rate=True,
+                    yaw=0.0,
+                )
+                await cmd
+                await asyncio.sleep(0.2)
+                continue
+            
+            # Определяем скорость и направление
+            if front_min < avoid_dist:
+                # Препятствие впереди - обходим
+                best_side = "left" if left_min > right_min else "right"
+                turn_sign = 1.0 if best_side == "left" else -1.0
+                
+                # Замедляемся и поворачиваем
+                safe_speed = cruise_speed * (front_min / avoid_dist) * 0.5
+                v_fwd_cmd = max(0.0, safe_speed)
+                v_right_cmd = turn_sign * safe_speed * 0.6  # Боковое движение для обхода
+                yaw_rate_cmd = turn_sign * max_yaw_rate * 0.5  # Меньший поворот, больше бокового движения
+                
+                # Небольшой подъем при обнаружении препятствия
+                current_z = target_z
+                if front_min < avoid_dist * 0.6:
+                    current_z = target_z - 1.0
+            else:
+                # Путь свободен - летим к цели с использованием бокового движения
+                # Скорость зависит от расстояния до цели
+                speed = min(cruise_speed, max(0.5, dist * 0.3))
+                
+                # Вычисляем направление к цели в world frame
+                v_n_world = speed * (dn / max(dist, 1e-6))
+                v_e_world = speed * (de / max(dist, 1e-6))
+                
+                # Преобразуем в body frame для использования v_forward и v_right
+                v_fwd_target, v_right_target = _world_to_body(v_n_world, v_e_world, yaw)
+                
+                # Если ошибка по углу небольшая, используем боковое движение для эффективного перемещения
+                if abs(yaw_error) < math.pi / 3:  # Меньше 60 градусов
+                    v_fwd_cmd = v_fwd_target
+                    v_right_cmd = v_right_target
+                    yaw_rate_cmd = _clamp(yaw_error * 0.5, -max_yaw_rate * 0.3, max_yaw_rate * 0.3)
+                else:
+                    # Большая ошибка - больше поворота, но также используем боковое движение
+                    v_fwd_cmd = v_fwd_target * 0.5
+                    v_right_cmd = v_right_target * 0.7
+                    yaw_rate_cmd = _clamp(yaw_error * 1.5, -max_yaw_rate, max_yaw_rate)
+                
+                current_z = target_z
+            
+            # Ограничиваем скорости
+            v_fwd_cmd = _clamp(v_fwd_cmd, -cruise_speed, cruise_speed)
+            v_right_cmd = _clamp(v_right_cmd, -cruise_speed, cruise_speed)
+            yaw_rate_cmd = _clamp(yaw_rate_cmd, -max_yaw_rate, max_yaw_rate)
+            
+            # Управляем дроном
+            cmd = await drone.move_by_velocity_body_frame_z_async(
+                v_forward=v_fwd_cmd,
+                v_right=v_right_cmd,
+                z=current_z,
+                duration=dt,
+                yaw_is_rate=True,
+                yaw=yaw_rate_cmd,
+            )
+            await cmd
+            await asyncio.sleep(0.01)
+        
+        # Таймаут waypoint
+        print(f"[forward_only] ⏱️ Таймаут waypoint, продолжаем...")
+        return True
+    
+    # === ОСНОВНОЙ ЦИКЛ СКАНИРОВАНИЯ ===
+    height_idx = 0
+    for current_height in heights:
+        height_idx += 1
+        
+        # Проверяем общий таймаут
+        if time.time() - t0 >= total_timeout_sec:
+            print(f"[forward_only] ⏱️ Общий таймаут исследования")
+            break
+        
+        print(f"\n[forward_only] ========== ВЫСОТА {height_idx}/{total_heights}: {current_height}м ==========")
+        
+        # Сначала поднимаемся/опускаемся на нужную высоту
+        print(f"[forward_only] Переход на высоту {current_height}м...")
+        for _ in range(20):  # ~2 секунды на изменение высоты
+            cmd = await drone.move_by_velocity_body_frame_z_async(
+                v_forward=0.0,
+                v_right=0.0,
+                z=current_height,
+                duration=0.1,
+                yaw_is_rate=True,
+                yaw=0.0,
+            )
+            await cmd
+            await asyncio.sleep(0.05)
+        
+        # Начальное сканирование на этой высоте
+        await do_full_scan_rotation(current_height)
+        
+        # Проходим все waypoints на этой высоте
+        wp_idx = 0
+        # Чередуем направление для чётных/нечётных высот (для лучшего покрытия)
+        wp_list = waypoints if height_idx % 2 == 1 else list(reversed(waypoints))
+        
+        for wp_n, wp_e in wp_list:
+            wp_idx += 1
+            
+            # Проверяем общий таймаут
+            if time.time() - t0 >= total_timeout_sec:
+                print(f"[forward_only] ⏱️ Общий таймаут исследования")
+                break
+            
+            print(f"[forward_only] 📍 Waypoint {wp_idx}/{total_waypoints}: ({wp_n:.1f}, {wp_e:.1f})")
+            
+            # Навигация к waypoint
+            reached = await navigate_to_waypoint(wp_n, wp_e, current_height)
+            
+            if not reached:
+                break  # Общий таймаут
+            
+            # Полный поворот для сканирования каждые 2-3 waypoint
+            if wp_idx % 2 == 0:
+                await do_full_scan_rotation(current_height)
+            else:
+                # Небольшая пауза для накопления данных
+                await asyncio.sleep(scan_pause)
+        
+        print(f"[forward_only] ✅ Высота {current_height}м завершена")
+    
+    # === ВОЗВРАТ К СТАРТОВОЙ ТОЧКЕ ===
+    print("\n[forward_only] ========================================")
+    print("[forward_only] Исследование завершено! Возвращаемся к стартовой точке...")
+    print("[forward_only] ========================================")
+    
+    # Навигация к стартовой точке
+    await navigate_to_waypoint(start_n, start_e, z, wp_timeout=120.0)
+    
+    # Финальное сканирование в стартовой точке
+    print("[forward_only] Финальное сканирование в стартовой точке...")
+    await do_full_scan_rotation(z)
+    
+    # Краткое зависание в конце
+    with contextlib.suppress(Exception):
+        hover_task = await drone.hover_async()
+        await hover_task
+    
+    elapsed = time.time() - t0
+    print(f"\n[forward_only] ========================================")
+    print(f"[forward_only] СКАНИРОВАНИЕ ЗАВЕРШЕНО!")
+    print(f"[forward_only] Время: {elapsed/60:.1f} минут")
+    print(f"[forward_only] Высот отсканировано: {height_idx}")
+    print(f"[forward_only] ========================================")
+
+
+async def explore_waypoints_sequential(
+    drone: Drone,
+    lidar_latest: LidarLatest,
+    pose_latest: PoseLatest,
+    imu_latest: ImuLatest,
+    lio_slam: SimpleLIO,
+    extent_n: float,
+    extent_e: float,
+    z: float,
+    cruise_speed: float,
+    dt: float,
+    avoid_dist: float,
+    max_yaw_rate: float,
+    total_timeout_sec: float = 600.0,
+) -> None:
+    """
+    Последовательный облёт точек A → B → C → D → E → A.
+    
+    Маршрут образует прямоугольник вокруг центральной области:
+    - A: стартовая позиция (центр)
+    - B: внизу слева (North-, East-)
+    - C: внизу справа (North-, East+)
+    - D: вверху справа (North+, East+)
+    - E: вверху слева (North+, East-)
+    - Возврат в A
+    
+    Args:
+        drone: Объект дрона
+        lidar_latest: Последние данные лидара
+        pose_latest: Последняя поза дрона
+        imu_latest: Последние данные IMU
+        lio_slam: Объект LIO-SLAM для точной навигации
+        extent_n: Размер области по North (м) - определяет расстояние до B/C и D/E от центра
+        extent_e: Размер области по East (м) - определяет расстояние до B/E и C/D от центра
+        z: Высота полета (NED, отрицательное = вверх)
+        cruise_speed: Крейсерская скорость (м/с)
+        dt: Шаг управления (сек)
+        avoid_dist: Дистанция срабатывания уклонения (м)
+        max_yaw_rate: Максимальная скорость рыскания (рад/с)
+        total_timeout_sec: Общий таймаут исследования (сек)
+    """
+    waypoint_arrive_tol = 2.0  # Допуск достижения waypoint (м)
+    scan_pause = 0.5  # Пауза для накопления данных лидара (сек)
+    scan_rotation_speed = math.pi / 2  # 90 град/сек
+    
+    # Ждём позицию из actual_pose
+    start_n = 0.0
+    start_e = 0.0
+    t_wait = time.time()
+    while True:
+        pose_msg, _ts = pose_latest.snapshot()
+        if pose_msg is not None and isinstance(pose_msg, dict):
+            pos = pose_msg.get("position", {})
+            start_n = float(pos.get("x", 0.0))
+            start_e = float(pos.get("y", 0.0))
+            break
+        if time.time() - t_wait > 5.0:
+            kin = drone.get_ground_truth_kinematics()
+            pos = kin["pose"]["position"]
+            start_n = float(pos["x"])
+            start_e = float(pos["y"])
+            break
+        await asyncio.sleep(0.05)
+
+    t0 = time.time()
+    
+    # Определяем точки маршрута относительно стартовой позиции
+    # Координатная система NED: North (X) = вправо на экране, East (Y) = вниз на экране
+    # A - стартовая позиция (центр)
+    # B - внизу слева (North-, East-)
+    # C - внизу справа (North-, East+)
+    # D - вверху справа (North+, East+)
+    # E - вверху слева (North+, East-)
+    # Маршрут: A → B → C → D → E → A (прямоугольник по часовой стрелке)
+    
+    waypoints_named = [
+        ("A (старт)", start_n, start_e),
+        ("B", start_n - extent_n, start_e - extent_e),
+        ("C", start_n - extent_n, start_e + extent_e),
+        ("D", start_n + extent_n, start_e + extent_e),
+        ("E", start_n + extent_n, start_e - extent_e),
+        ("A (возврат)", start_n, start_e),
+    ]
+    
+    print("[waypoints] ========================================")
+    print("[waypoints] ПОСЛЕДОВАТЕЛЬНЫЙ ОБЛЁТ ТОЧЕК A → B → C → D → E → A")
+    print(f"[waypoints] Высота полёта: {z}м (NED)")
+    print(f"[waypoints] Скорость: {cruise_speed} м/с")
+    print(f"[waypoints] Область: {extent_n}м x {extent_e}м")
+    print("[waypoints] Маршрут:")
+    for name, n, e in waypoints_named:
+        print(f"  - {name}: ({n:.1f}, {e:.1f})")
+    print("[waypoints] ========================================")
+    
+    # === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: Поворот на 360° для сканирования ===
+    async def do_scan_rotation():
+        """Выполняет полный оборот на 360° для сканирования."""
+        print(f"[waypoints] 🔄 Сканирование 360°...")
+        rotation_duration = 360.0 / (scan_rotation_speed * 180 / math.pi)
+        rotation_steps = int(rotation_duration / dt) + 1
+        
+        for _ in range(rotation_steps):
+            if time.time() - t0 >= total_timeout_sec:
+                return
+            cmd = await drone.move_by_velocity_body_frame_z_async(
+                v_forward=0.0,
+                v_right=0.0,
+                z=z,
+                duration=dt,
+                yaw_is_rate=True,
+                yaw=scan_rotation_speed,
+            )
+            await cmd
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(scan_pause)
+    
+    # === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: Движение к waypoint ===
+    async def navigate_to_waypoint(target_n: float, target_e: float, wp_timeout: float = 60.0) -> bool:
+        """Навигация к waypoint с избеганием препятствий."""
+        wp_start = time.time()
+        stuck_counter = 0
+        last_dist = float('inf')
+        
+        while time.time() - wp_start < wp_timeout:
+            if time.time() - t0 >= total_timeout_sec:
+                return False
+            
+            pose_msg, _pose_ts = pose_latest.snapshot()
+            if pose_msg is None:
+                await asyncio.sleep(0.05)
+                continue
+            
+            # Обновляем LIO-SLAM
+            imu_orientation, imu_angular_velocity, imu_linear_acceleration, imu_time = imu_latest.snapshot()
+            lidar_pts, lidar_time = lidar_latest.snapshot()
+            
+            lio_state = lio_slam.update_state(
+                imu_orientation=imu_orientation,
+                imu_angular_velocity=imu_angular_velocity,
+                imu_linear_acceleration=imu_linear_acceleration,
+                imu_time=imu_time,
+                lidar_points=lidar_pts,
+                pose_gt=pose_msg,
+                lidar_time=lidar_time,
+            )
+            
+            pos = pose_msg.get("position", {}) if isinstance(pose_msg, dict) else {}
+            ori = pose_msg.get("orientation", {}) if isinstance(pose_msg, dict) else {}
+            
+            lio_pos = lio_state.get("position", [0.0, 0.0, 0.0])
+            gt_n = float(pos.get("x", lio_pos[0]))
+            gt_e = float(pos.get("y", lio_pos[1]))
+            
+            alpha_lio = 0.7
+            cur_n = alpha_lio * lio_pos[0] + (1.0 - alpha_lio) * gt_n
+            cur_e = alpha_lio * lio_pos[1] + (1.0 - alpha_lio) * gt_e
+            
+            lio_ori = lio_state.get("orientation", ori if isinstance(ori, dict) else {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0})
+            yaw = _quat_to_yaw_rad(lio_ori)
+            
+            dn = target_n - cur_n
+            de = target_e - cur_e
+            dist = math.hypot(dn, de)
+            
+            # Достигли waypoint
+            if dist < waypoint_arrive_tol:
+                return True
+            
+            # Проверка на застревание
+            if abs(dist - last_dist) < 0.1:
+                stuck_counter += 1
+                if stuck_counter > 50:
+                    print(f"[waypoints] ⚠️ Застряли! Пропускаем waypoint")
+                    return True
+            else:
+                stuck_counter = 0
+            last_dist = dist
+            
+            target_yaw = math.atan2(de, dn)
+            yaw_error = target_yaw - yaw
+            while yaw_error > math.pi:
+                yaw_error -= 2 * math.pi
+            while yaw_error < -math.pi:
+                yaw_error += 2 * math.pi
+            
+            pts, _ts = lidar_latest.snapshot()
+            
+            if pts is None or getattr(pts, "size", 0) == 0:
+                speed = cruise_speed * 0.5
+                if abs(yaw_error) > 0.3:
+                    v_fwd_cmd = 0.0
+                    yaw_rate_cmd = _clamp(yaw_error * 2.0, -max_yaw_rate, max_yaw_rate)
+                else:
+                    v_fwd_cmd = speed
+                    yaw_rate_cmd = _clamp(yaw_error * 1.0, -max_yaw_rate * 0.5, max_yaw_rate * 0.5)
+                
+                cmd = await drone.move_by_velocity_body_frame_z_async(
+                    v_forward=v_fwd_cmd,
+                    v_right=0.0,
+                    z=z,
+                    duration=dt,
+                    yaw_is_rate=True,
+                    yaw=yaw_rate_cmd,
+                )
+                await cmd
+                await asyncio.sleep(0.01)
+                continue
+            
+            front_min = _min_range_in_cone(pts, az_min_rad=-math.radians(45), az_max_rad=math.radians(45), max_range=999.0)
+            left_min = _min_range_in_cone(pts, az_min_rad=math.radians(30), az_max_rad=math.radians(90), max_range=999.0)
+            right_min = _min_range_in_cone(pts, az_min_rad=-math.radians(90), az_max_rad=-math.radians(30), max_range=999.0)
+            
+            gear_collision_danger = _check_landing_gear_collision(pts, landing_gear_height=0.5, safety_margin=1.5)
+            
+            # Критическая опасность
+            if front_min < 1.5 or gear_collision_danger:
+                print(f"[waypoints] 🚨 КРИТИЧЕСКАЯ ОПАСНОСТЬ ({front_min:.1f}м)! Экстренный маневр!")
+                cmd = await drone.move_by_velocity_body_frame_z_async(
+                    v_forward=-cruise_speed * 0.5,
+                    v_right=0.0,
+                    z=z - 2.0,
+                    duration=0.5,
+                    yaw_is_rate=True,
+                    yaw=0.0,
+                )
+                await cmd
+                await asyncio.sleep(0.2)
+                continue
+            
+            if front_min < avoid_dist:
+                best_side = "left" if left_min > right_min else "right"
+                turn_sign = 1.0 if best_side == "left" else -1.0
+                safe_speed = cruise_speed * (front_min / avoid_dist) * 0.5
+                v_fwd_cmd = max(0.0, safe_speed)
+                v_right_cmd = turn_sign * safe_speed * 0.6
+                yaw_rate_cmd = turn_sign * max_yaw_rate * 0.5
+                current_z = z - 1.0 if front_min < avoid_dist * 0.6 else z
+            else:
+                speed = min(cruise_speed, max(0.5, dist * 0.3))
+                v_n_world = speed * (dn / max(dist, 1e-6))
+                v_e_world = speed * (de / max(dist, 1e-6))
+                v_fwd_target, v_right_target = _world_to_body(v_n_world, v_e_world, yaw)
+                
+                if abs(yaw_error) < math.pi / 3:
+                    v_fwd_cmd = v_fwd_target
+                    v_right_cmd = v_right_target
+                    yaw_rate_cmd = _clamp(yaw_error * 0.5, -max_yaw_rate * 0.3, max_yaw_rate * 0.3)
+                else:
+                    v_fwd_cmd = v_fwd_target * 0.5
+                    v_right_cmd = v_right_target * 0.7
+                    yaw_rate_cmd = _clamp(yaw_error * 1.5, -max_yaw_rate, max_yaw_rate)
+                current_z = z
+            
+            v_fwd_cmd = _clamp(v_fwd_cmd, -cruise_speed, cruise_speed)
+            v_right_cmd = _clamp(v_right_cmd, -cruise_speed, cruise_speed)
+            yaw_rate_cmd = _clamp(yaw_rate_cmd, -max_yaw_rate, max_yaw_rate)
+            
+            cmd = await drone.move_by_velocity_body_frame_z_async(
+                v_forward=v_fwd_cmd,
+                v_right=v_right_cmd,
+                z=current_z,
+                duration=dt,
+                yaw_is_rate=True,
+                yaw=yaw_rate_cmd,
+            )
+            await cmd
+            await asyncio.sleep(0.01)
+        
+        print(f"[waypoints] ⏱️ Таймаут waypoint")
+        return True
+    
+    # === ОСНОВНОЙ ЦИКЛ ОБЛЁТА ===
+    print(f"\n[waypoints] Поднимаемся на высоту {z}м...")
+    for _ in range(30):
+        cmd = await drone.move_by_velocity_body_frame_z_async(
+            v_forward=0.0,
+            v_right=0.0,
+            z=z,
+            duration=0.1,
+            yaw_is_rate=True,
+            yaw=0.0,
+        )
+        await cmd
+        await asyncio.sleep(0.05)
+    
+    # Начальное сканирование в точке A
+    print("[waypoints] 📍 Точка A (старт) - начальное сканирование")
+    await do_scan_rotation()
+    
+    # Облёт точек B, C, D, E
+    for i, (name, wp_n, wp_e) in enumerate(waypoints_named[1:], 1):
+        if time.time() - t0 >= total_timeout_sec:
+            print(f"[waypoints] ⏱️ Общий таймаут")
+            break
+        
+        print(f"\n[waypoints] ➡️ Летим к точке {name} ({wp_n:.1f}, {wp_e:.1f})")
+        reached = await navigate_to_waypoint(wp_n, wp_e, wp_timeout=90.0)
+        
+        if reached:
+            print(f"[waypoints] ✅ Достигли точки {name}")
+            await do_scan_rotation()
+        else:
+            print(f"[waypoints] ❌ Не удалось достичь точки {name}")
+    
+    # Финальное зависание
+    with contextlib.suppress(Exception):
+        hover_task = await drone.hover_async()
+        await hover_task
+    
+    elapsed = time.time() - t0
+    print(f"\n[waypoints] ========================================")
+    print(f"[waypoints] ОБЛЁТ ЗАВЕРШЁН!")
+    print(f"[waypoints] Время: {elapsed/60:.1f} минут")
+    print(f"[waypoints] ========================================")
 
 
 async def explore_map_systematic(
@@ -3310,7 +4068,7 @@ async def main():
     parser.add_argument("--side-length", type=float, default=10.0)
     parser.add_argument("--height", type=float, default=-5.0, help="Высота в NED (отрицательное значение = вверх).")
     parser.add_argument("--velocity", type=float, default=1.5)
-    parser.add_argument("--mission", default="slam", choices=["explore", "square", "shelves", "slam", "systematic"])
+    parser.add_argument("--mission", default="slam", choices=["explore", "square", "shelves", "slam", "systematic", "forward", "waypoints"])
     parser.add_argument("--scene", default="scene_blocks_lidar_mapping.jsonc")
     parser.add_argument("--sim-config-path", default="sim_config")
     parser.add_argument("--acc-max-points", type=int, default=500_000, help="Макс. накопленных точек в памяти.")
@@ -3684,6 +4442,76 @@ async def main():
                     max_repulse=args.max_repulse,
                     max_yaw_rate=args.max_yaw_rate,
                     grid_resolution=args.grid_resolution,
+                    total_timeout_sec=args.explore_timeout,
+                )
+            elif args.mission == "forward":
+                print("[forward] starting forward-only exploration with SLAM mapping and obstacle avoidance")
+                # Инициализация LIO-SLAM с начальной позицией
+                pose_msg, _ts = pose_latest.snapshot()
+                if pose_msg is not None and isinstance(pose_msg, dict):
+                    pos = pose_msg.get("position", {})
+                    ori = pose_msg.get("orientation", {})
+                    if pos and ori:
+                        lio_slam.position = [
+                            float(pos.get("x", 0.0)),
+                            float(pos.get("y", 0.0)),
+                            float(pos.get("z", 0.0))
+                        ]
+                        lio_slam.orientation = {
+                            "w": float(ori.get("w", 1.0)),
+                            "x": float(ori.get("x", 0.0)),
+                            "y": float(ori.get("y", 0.0)),
+                            "z": float(ori.get("z", 0.0))
+                        }
+                
+                await explore_forward_only(
+                    drone=drone,
+                    lidar_latest=lidar_latest,
+                    pose_latest=pose_latest,
+                    imu_latest=imu_latest,
+                    lio_slam=lio_slam,
+                    extent_n=args.explore_extent_n,
+                    extent_e=args.explore_extent_e,
+                    z=args.height,
+                    cruise_speed=args.velocity,
+                    dt=args.ctrl_dt,
+                    avoid_dist=args.avoid_dist,
+                    max_yaw_rate=args.max_yaw_rate,
+                    total_timeout_sec=args.explore_timeout,
+                )
+            elif args.mission == "waypoints":
+                print("[waypoints] starting sequential waypoint navigation A → B → C → D → E → A")
+                # Инициализация LIO-SLAM с начальной позицией
+                pose_msg, _ts = pose_latest.snapshot()
+                if pose_msg is not None and isinstance(pose_msg, dict):
+                    pos = pose_msg.get("position", {})
+                    ori = pose_msg.get("orientation", {})
+                    if pos and ori:
+                        lio_slam.position = [
+                            float(pos.get("x", 0.0)),
+                            float(pos.get("y", 0.0)),
+                            float(pos.get("z", 0.0))
+                        ]
+                        lio_slam.orientation = {
+                            "w": float(ori.get("w", 1.0)),
+                            "x": float(ori.get("x", 0.0)),
+                            "y": float(ori.get("y", 0.0)),
+                            "z": float(ori.get("z", 0.0))
+                        }
+                
+                await explore_waypoints_sequential(
+                    drone=drone,
+                    lidar_latest=lidar_latest,
+                    pose_latest=pose_latest,
+                    imu_latest=imu_latest,
+                    lio_slam=lio_slam,
+                    extent_n=args.explore_extent_n,
+                    extent_e=args.explore_extent_e,
+                    z=args.height,
+                    cruise_speed=args.velocity,
+                    dt=args.ctrl_dt,
+                    avoid_dist=args.avoid_dist,
+                    max_yaw_rate=args.max_yaw_rate,
                     total_timeout_sec=args.explore_timeout,
                 )
             else:
