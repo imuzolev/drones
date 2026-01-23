@@ -147,15 +147,42 @@ class RealtimePointCloudVisualizer:
                 if has_points:
                     points_vis = self._transform_ned_to_vis(points_xyz)
                     
+                    # === Color classification: Floor (gray), Walls (blue), Obstacles (green) ===
+                    vis_x = points_vis[:, 0]  # East/Right
+                    vis_y = points_vis[:, 1]  # Up (height)
+                    vis_z = points_vis[:, 2]  # North/Forward
+                    
+                    # 1. Floor: lowest points (within 0.5m from minimum height)
+                    min_y = np.min(vis_y)
+                    floor_mask = (vis_y < min_y + 0.5)
+                    
+                    # 2. Walls: points near the boundaries of the map (outer perimeter)
+                    min_x, max_x = np.min(vis_x), np.max(vis_x)
+                    min_z, max_z = np.min(vis_z), np.max(vis_z)
+                    
+                    wall_margin = 1.5
+                    near_min_x = (vis_x < min_x + wall_margin)
+                    near_max_x = (vis_x > max_x - wall_margin)
+                    near_min_z = (vis_z < min_z + wall_margin)
+                    near_max_z = (vis_z > max_z - wall_margin)
+                    
+                    wall_mask = (near_min_x | near_max_x | near_min_z | near_max_z) & ~floor_mask
+                    
+                    # 3. Obstacles: everything else
+                    obstacle_mask = ~floor_mask & ~wall_mask
+                    
+                    colors = np.zeros((points_vis.shape[0], 3))
+                    colors[floor_mask] = [0.4, 0.4, 0.4]      # Floor (Gray)
+                    colors[wall_mask] = [0.2, 0.4, 1.0]       # Walls (Blue)
+                    colors[obstacle_mask] = [0.0, 1.0, 0.0]   # Obstacles (Green)
+
                     if self.pcd is None:
                         self.pcd = o3d.geometry.PointCloud()
                         self.pcd.points = o3d.utility.Vector3dVector(points_vis)
-                        colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
                         self.pcd.colors = o3d.utility.Vector3dVector(colors)
-                        self.vis.add_geometry(self.pcd, reset_bounding_box=False) # Don't reset view
+                        self.vis.add_geometry(self.pcd, reset_bounding_box=False)
                     else:
                         self.pcd.points = o3d.utility.Vector3dVector(points_vis)
-                        colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
                         self.pcd.colors = o3d.utility.Vector3dVector(colors)
                         self.vis.update_geometry(self.pcd)
 
@@ -376,11 +403,36 @@ def display_point_cloud(points_xyz, clean_cloud: bool = True, point_size: float 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points_vis)
     
-    # Устанавливаем зеленый цвет для всех точек
+    # === Color classification: Floor (gray), Walls (blue), Obstacles (green) ===
     if points_vis.shape[0] > 0:
-        # Создаем массив зеленого цвета для всех точек
-        # RGB: (0.0, 0.8, 0.0) - яркий зеленый цвет
-        colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
+        vis_x = points_vis[:, 0]  # East/Right
+        vis_y = points_vis[:, 1]  # Up (height)
+        vis_z = points_vis[:, 2]  # North/Forward
+        
+        # 1. Floor: lowest points (within 0.5m from minimum height)
+        min_y = np.min(vis_y)
+        floor_mask = (vis_y < min_y + 0.5)
+        
+        # 2. Walls: points near the boundaries of the map (outer perimeter)
+        min_x, max_x = np.min(vis_x), np.max(vis_x)
+        min_z, max_z = np.min(vis_z), np.max(vis_z)
+        
+        wall_margin = 1.5
+        near_min_x = (vis_x < min_x + wall_margin)
+        near_max_x = (vis_x > max_x - wall_margin)
+        near_min_z = (vis_z < min_z + wall_margin)
+        near_max_z = (vis_z > max_z - wall_margin)
+        
+        wall_mask = (near_min_x | near_max_x | near_min_z | near_max_z) & ~floor_mask
+        
+        # 3. Obstacles: everything else
+        obstacle_mask = ~floor_mask & ~wall_mask
+        
+        colors = np.zeros((points_vis.shape[0], 3))
+        colors[floor_mask] = [0.4, 0.4, 0.4]      # Floor (Gray)
+        colors[wall_mask] = [0.2, 0.4, 1.0]       # Walls (Blue)
+        colors[obstacle_mask] = [0.0, 1.0, 0.0]   # Obstacles (Green)
+        
         pcd.colors = o3d.utility.Vector3dVector(colors)
     
     # Вычисляем нормали для улучшения визуализации (опционально, но улучшает вид)

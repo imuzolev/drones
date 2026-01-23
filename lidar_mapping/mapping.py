@@ -109,8 +109,48 @@ def save_point_cloud_to_ply(points_xyz, trajectory_xyz=None, filename: str = "re
             # Original code: points_vis[:, 2] = -points_xyz[:, 0] -> Z = -North.
             
             all_points.append(p_vis)
-            # Green color
-            all_colors.append(np.ones((p_vis.shape[0], 3)) * [0.0, 0.8, 0.0])
+            
+            # === Color classification: Floor (gray), Walls (blue), Obstacles (green) ===
+            vis_x = p_vis[:, 0]  # East/Right
+            vis_y = p_vis[:, 1]  # Up (height)
+            vis_z = p_vis[:, 2]  # North/Forward
+            
+            # 1. Floor: lowest points (within 1.5m from minimum height)
+            # Increased threshold to capture more floor area
+            min_y = np.min(vis_y)
+            floor_mask = (vis_y < min_y + 1.5)
+            
+            # 2. Walls: points near the boundaries of the map (outer perimeter)
+            # Calculate bounding box
+            min_x, max_x = np.min(vis_x), np.max(vis_x)
+            min_z, max_z = np.min(vis_z), np.max(vis_z)
+            
+            # Wall margin: points within 1.5m from the outer boundary are considered walls
+            wall_margin = 1.5
+            near_min_x = (vis_x < min_x + wall_margin)
+            near_max_x = (vis_x > max_x - wall_margin)
+            near_min_z = (vis_z < min_z + wall_margin)
+            near_max_z = (vis_z > max_z - wall_margin)
+            
+            # Wall mask: near any boundary AND not floor
+            wall_mask = (near_min_x | near_max_x | near_min_z | near_max_z) & ~floor_mask
+            
+            # 3. Obstacles (shelves, etc.): everything else that is not floor and not wall
+            obstacle_mask = ~floor_mask & ~wall_mask
+            
+            # Initialize colors array
+            colors = np.zeros((p_vis.shape[0], 3))
+            
+            # Floor color (Gray)
+            colors[floor_mask] = [0.4, 0.4, 0.4]
+            
+            # Wall color (Blue)
+            colors[wall_mask] = [0.2, 0.4, 1.0]
+            
+            # Obstacle color (Green) - shelves, furniture, etc.
+            colors[obstacle_mask] = [0.0, 1.0, 0.0]
+
+            all_colors.append(colors)
 
         # 2. Trajectory Points (Red)
         if has_traj:
