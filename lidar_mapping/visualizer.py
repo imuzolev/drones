@@ -14,18 +14,21 @@ class RealtimePointCloudVisualizer:
     Окно открывается сразу при создании и обновляется периодически.
     """
     
-    def __init__(self, acc: PointCloudAccumulator, update_interval: float = 0.1, max_display_points: int = 100_000):
+    def __init__(self, acc: PointCloudAccumulator, pose_provider=None, update_interval: float = 0.1, max_display_points: int = 500_000):
         """
         Args:
             acc: PointCloudAccumulator для получения точек
+            pose_provider: объект с методом snapshot() -> (pose_msg, timestamp), например PoseHistory или PoseLatest
             update_interval: интервал обновления визуализации в секундах
-            max_display_points: максимальное количество точек для отображения (для производительности)
+            max_display_points: максимальное количество точек для отображения
         """
         self.acc = acc
+        self.pose_provider = pose_provider
         self.update_interval = update_interval
         self.max_display_points = max_display_points
         self.vis = None
         self.pcd = None
+        self.drone_frame = None  # Coordinate frame for the drone
         self.running = False
         self.thread = None
         self.lock = threading.Lock()
@@ -48,6 +51,76 @@ class RealtimePointCloudVisualizer:
         points_vis[:, 1] = -points_xyz[:, 2]   # -Down -> Up
         points_vis[:, 2] = -points_xyz[:, 0]   # -North -> Forward
         return points_vis
+
+    def _get_drone_transform_vis(self):
+        """Возвращает матрицу трансформации (4x4) дрона в системе координат визуализации."""
+        if self.pose_provider is None:
+            return None
+            
+        try:
+            import numpy as np
+            pose_msg, _ = self.pose_provider.snapshot()
+            if not pose_msg or not isinstance(pose_msg, dict):
+                return None
+                
+            pos = pose_msg.get("position", {})
+            ori = pose_msg.get("orientation", {})
+            
+            # Position NED
+            pn = float(pos.get("x", 0.0))
+            pe = float(pos.get("y", 0.0))
+            pd = float(pos.get("z", 0.0))
+            
+            # Orientation NED (Quaternion)
+            w = float(ori.get("w", 1.0))
+            x = float(ori.get("x", 0.0))
+            y = float(ori.get("y", 0.0))
+            z = float(ori.get("z", 0.0))
+            
+            # Rotation Matrix Body -> NED
+            # R = [1-2(y²+z²)   2(xy-wz)     2(xz+wy)   ]
+            #     [2(xy+wz)     1-2(x²+z²)   2(yz-wx)   ]
+            #     [2(xz-wy)     2(yz+wx)     1-2(x²+y²) ]
+            
+            xx = x*x; yy = y*y; zz = z*z
+            xy = x*y; xz = x*z; yz = y*z
+            wx = w*x; wy = w*y; wz = w*z
+            
+            R_ned = np.array([
+                [1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
+                [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
+                [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]
+            ])
+            
+            # Transform to Vis Frame
+            # Basis vectors of Body in NED are the columns of R_ned
+            # b_x_ned = R_ned[:, 0]
+            # b_y_ned = R_ned[:, 1]
+            # b_z_ned = R_ned[:, 2]
+            
+            # NED to Vis mapping for vectors: v_vis = [v_ned.y, -v_ned.z, -v_ned.x]
+            def to_vis_vec(v):
+                return np.array([v[1], -v[2], -v[0]])
+                
+            b_x_vis = to_vis_vec(R_ned[:, 0])
+            b_y_vis = to_vis_vec(R_ned[:, 1])
+            b_z_vis = to_vis_vec(R_ned[:, 2])
+            
+            # Rotation Matrix Vis
+            R_vis = np.column_stack([b_x_vis, b_y_vis, b_z_vis])
+            
+            # Position Vis
+            p_vis = np.array([pe, -pd, -pn])
+            
+            # 4x4 Transform
+            T = np.eye(4)
+            T[:3, :3] = R_vis
+            T[:3, 3] = p_vis
+            
+            return T
+            
+        except Exception:
+            return None
     
     def _update_visualization(self):
         """Обновляет визуализацию с новыми данными из аккумулятора."""
@@ -60,74 +133,74 @@ class RealtimePointCloudVisualizer:
         # Получаем снимок точек из аккумулятора
         points_xyz = self.acc.snapshot(max_points=self.max_display_points)
         
-        if points_xyz is None or getattr(points_xyz, "size", 0) == 0:
-            # Нет точек, но продолжаем обновлять окно
-            with self.lock:
-                if self.vis is not None and self.running:
-                    try:
-                        self.vis.poll_events()
-                        self.vis.update_renderer()
-                    except:
-                        pass
-            return False
-        
-        # Преобразуем координаты
-        points_vis = self._transform_ned_to_vis(points_xyz)
-        if points_vis is None:
-            return False
+        # Обновляем дрон
+        drone_T = self._get_drone_transform_vis()
         
         with self.lock:
             if self.vis is None or not self.running:
                 return False
-            
-            try:
-                # Обновляем или создаем облако точек
-                if self.pcd is None:
-                    self.pcd = o3d.geometry.PointCloud()
-                    self.pcd.points = o3d.utility.Vector3dVector(points_vis)
-                    # Устанавливаем зеленый цвет
-                    colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
-                    self.pcd.colors = o3d.utility.Vector3dVector(colors)
-                    self.vis.add_geometry(self.pcd, reset_bounding_box=True)
-                    
-                    # Настраиваем камеру для просмотра облака точек
-                    view_control = self.vis.get_view_control()
-                    if points_vis.shape[0] > 0:
-                        center = np.mean(points_vis, axis=0)
-                        extent = np.max(points_vis, axis=0) - np.min(points_vis, axis=0)
-                        max_extent = np.max(extent) if np.max(extent) > 0 else 10.0
-                        
-                        view_control.set_front([0.5, -0.5, -0.7])
-                        view_control.set_lookat(center)
-                        view_control.set_up([0, 1, 0])
-                        view_control.set_zoom(0.7)
-                else:
-                    # Обновляем существующее облако точек
-                    old_point_count = len(self.pcd.points)
-                    self.pcd.points = o3d.utility.Vector3dVector(points_vis)
-                    # Обновляем цвета
-                    colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
-                    self.pcd.colors = o3d.utility.Vector3dVector(colors)
-                    
-                    # Если это первое появление точек (было пусто, стало не пусто), настраиваем камеру
-                    if old_point_count == 0 and points_vis.shape[0] > 0:
-                        # Перестраиваем bounding box и настраиваем камеру
-                        self.vis.clear_geometries()
-                        self.vis.add_geometry(self.pcd, reset_bounding_box=True)
-                        view_control = self.vis.get_view_control()
-                        center = np.mean(points_vis, axis=0)
-                        extent = np.max(points_vis, axis=0) - np.min(points_vis, axis=0)
-                        max_extent = np.max(extent) if np.max(extent) > 0 else 10.0
-                        view_control.set_front([0.5, -0.5, -0.7])
-                        view_control.set_lookat(center)
-                        view_control.set_up([0, 1, 0])
-                        view_control.set_zoom(0.7)
-                        print(f"[VISUALIZER] Первые точки появились! Центр: {center}, Размер: {extent}")
-                    else:
-                        # Обычное обновление
-                        self.vis.update_geometry(self.pcd)
                 
-                # Обрабатываем события окна и обновляем рендерер
+            try:
+                # 1. Update Point Cloud
+                has_points = (points_xyz is not None and getattr(points_xyz, "size", 0) > 0)
+                
+                if has_points:
+                    points_vis = self._transform_ned_to_vis(points_xyz)
+                    
+                    if self.pcd is None:
+                        self.pcd = o3d.geometry.PointCloud()
+                        self.pcd.points = o3d.utility.Vector3dVector(points_vis)
+                        colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
+                        self.pcd.colors = o3d.utility.Vector3dVector(colors)
+                        self.vis.add_geometry(self.pcd, reset_bounding_box=False) # Don't reset view
+                    else:
+                        self.pcd.points = o3d.utility.Vector3dVector(points_vis)
+                        colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
+                        self.pcd.colors = o3d.utility.Vector3dVector(colors)
+                        self.vis.update_geometry(self.pcd)
+
+                # 2. Update Drone Marker
+                if drone_T is not None:
+                    if self.drone_frame is None:
+                        # Create drone coordinate frame (Red=Forward, Green=Right, Blue=Down in body frame if mapped correctly)
+                        # Actually CreateCoordinateFrame makes X=Red, Y=Green, Z=Blue
+                        # Our transform maps BodyX->Red, BodyY->Green, BodyZ->Blue
+                        self.drone_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0, origin=[0, 0, 0])
+                        self.drone_frame.transform(drone_T)
+                        self.vis.add_geometry(self.drone_frame, reset_bounding_box=False)
+                    else:
+                        # Since open3d geometry transform is cumulative or applied to vertices,
+                        # it's easier to recreate or reset. 
+                        # But create_coordinate_frame is a Mesh. We can set vertices?
+                        # No, easier to remove and add, or use a persistent transform if possible.
+                        # Actually Open3D legacy visualizer is tricky with transforms.
+                        # Easiest: Create new frame, or deep copy canonical and transform.
+                        # But removing/adding is slow.
+                        # Let's try transforming vertices?
+                        # No, let's keep a canonical frame and transform it.
+                        
+                        # Better approach: store canonical frame and copy+transform?
+                        # No, visualizer needs the object reference.
+                        
+                        # We can modify the vertices of self.drone_frame in place?
+                        # Let's try removing and adding for simplicity first, performance might be ok for 1 object.
+                        self.vis.remove_geometry(self.drone_frame, reset_bounding_box=False)
+                        self.drone_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0, origin=[0, 0, 0])
+                        self.drone_frame.transform(drone_T)
+                        self.vis.add_geometry(self.drone_frame, reset_bounding_box=False)
+
+                # 3. First time camera setup
+                # Only if we have points and camera hasn't been set
+                if has_points and not hasattr(self, "_camera_initialized"):
+                    self.vis.reset_view_point(True)
+                    view_control = self.vis.get_view_control()
+                    center = np.mean(points_vis, axis=0)
+                    view_control.set_front([0.5, -0.5, -0.7])
+                    view_control.set_lookat(center)
+                    view_control.set_up([0, 1, 0])
+                    view_control.set_zoom(0.7)
+                    self._camera_initialized = True
+
                 self.vis.poll_events()
                 self.vis.update_renderer()
                 

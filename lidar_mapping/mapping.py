@@ -47,16 +47,14 @@ class PointCloudAccumulator:
         return pts
 
 
-def save_point_cloud_to_ply(points_xyz, filename: str = "result.ply"):
+def save_point_cloud_to_ply(points_xyz, trajectory_xyz=None, filename: str = "result.ply"):
     """
-    Сохраняет облако точек в PLY файл.
+    Сохраняет облако точек и траекторию в PLY файл.
     
     Args:
-        points_xyz: numpy array (N, 3) точек в системе координат NED
-        filename: имя файла для сохранения (по умолчанию "result.ply")
-    
-    Returns:
-        bool: True если сохранение успешно, False в противном случае
+        points_xyz: numpy array (N, 3) точек препятствий (NED)
+        trajectory_xyz: numpy array (M, 3) точек траектории (NED) или список
+        filename: имя файла для сохранения
     """
     try:
         import numpy as np
@@ -65,42 +63,157 @@ def save_point_cloud_to_ply(points_xyz, filename: str = "result.ply"):
         print(f"[ERROR] Не удалось импортировать open3d: {e}")
         return False
     
-    if points_xyz is None or getattr(points_xyz, "size", 0) == 0:
-        print("[ERROR] Облако точек пустое, нечего сохранять!")
+    has_points = points_xyz is not None and getattr(points_xyz, "size", 0) > 0
+    
+    # Обработка траектории
+    traj_arr = None
+    if trajectory_xyz is not None:
+        if isinstance(trajectory_xyz, list):
+             if len(trajectory_xyz) > 0:
+                 traj_arr = np.array(trajectory_xyz, dtype=np.float32)
+        else:
+             if getattr(trajectory_xyz, "size", 0) > 0:
+                 traj_arr = trajectory_xyz
+
+    has_traj = traj_arr is not None and traj_arr.size > 0
+
+    if not has_points and not has_traj:
+        print("[ERROR] Нет данных для сохранения (ни точек, ни траектории)!")
         return False
     
     try:
-        # Преобразуем из NED в стандартную систему координат (Z вверх)
-        # NED: X=North, Y=East, Z=Down (положительный Z вниз)
-        # Для сохранения: X=Right, Y=Forward, Z=Up
-        points_vis = np.zeros_like(points_xyz)
-        points_vis[:, 0] = points_xyz[:, 1]   # East -> Right
-        points_vis[:, 1] = -points_xyz[:, 2]  # -Down -> Up
-        points_vis[:, 2] = -points_xyz[:, 0]  # -North -> Forward
+        # Lists for merging
+        all_points = []
+        all_colors = []
+
+        # 1. Obstacle Points (Green)
+        if has_points:
+            # NED -> Visual conversion
+            # Visual: X=Right, Y=Up, Z=Forward
+            # NED: X=North, Y=East, Z=Down
+            # We want: Vis X = NED Y, Vis Y = -NED Z, Vis Z = NED X (Standard ROS/AirSim view usually X=Forward, but Open3D default is Y up)
+            
+            # Let's stick to the previous transform that worked for the user:
+            # Vis X = NED Y
+            # Vis Y = -NED Z
+            # Vis Z = -NED X (Wait, previously it was -NED X? Let's check original code)
+            # Original: vis[:, 2] = -points_xyz[:, 0]
+            
+            p_vis = np.zeros_like(points_xyz)
+            p_vis[:, 0] = points_xyz[:, 1]   # Right = East
+            p_vis[:, 1] = -points_xyz[:, 2]  # Up = -Down
+            p_vis[:, 2] = -points_xyz[:, 0]  # Forward = -North (This rotates the map 180 degrees? Usually Forward=North)
+            # If North is X, and we want Forward to be -Z (OpenGL convention), then North->-Z is correct if we look down Z.
+            # But typically: X=North, Y=East, Z=Down.
+            # Visual: X=East, Y=-Down(Up), Z=North.
+            # Original code: points_vis[:, 2] = -points_xyz[:, 0] -> Z = -North.
+            
+            all_points.append(p_vis)
+            # Green color
+            all_colors.append(np.ones((p_vis.shape[0], 3)) * [0.0, 0.8, 0.0])
+
+        # 2. Trajectory Points (Red)
+        if has_traj:
+            t_vis = np.zeros_like(traj_arr)
+            t_vis[:, 0] = traj_arr[:, 1]
+            t_vis[:, 1] = -traj_arr[:, 2]
+            t_vis[:, 2] = -traj_arr[:, 0]
+            
+            all_points.append(t_vis)
+            # Red color
+            all_colors.append(np.ones((t_vis.shape[0], 3)) * [1.0, 0.0, 0.0])
+
+        # Combine
+        final_points = np.concatenate(all_points, axis=0)
+        final_colors = np.concatenate(all_colors, axis=0)
         
-        # Создаем облако точек open3d
+        # Create Cloud
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points_vis)
+        pcd.points = o3d.utility.Vector3dVector(final_points)
+        pcd.colors = o3d.utility.Vector3dVector(final_colors)
         
-        # Устанавливаем зеленый цвет для всех точек
-        colors = np.ones((points_vis.shape[0], 3)) * [0.0, 0.8, 0.0]
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-        
-        # Сохраняем в PLY файл
+        # Save
         success = o3d.io.write_point_cloud(filename, pcd, write_ascii=False)
         
         if success:
-            print(f"[SAVE] Облако точек успешно сохранено в {filename}")
-            print(f"[SAVE] Количество точек: {points_vis.shape[0]}")
+            print(f"[SAVE] Сохранено: {final_points.shape[0]} точек (Map+Path) в {filename}")
             return True
         else:
-            print(f"[ERROR] Не удалось сохранить облако точек в {filename}")
             return False
+
     except Exception as e:
-        print(f"[ERROR] Ошибка при сохранении облака точек: {e}")
+        print(f"[ERROR] Ошибка при сохранении: {e}")
         import traceback
         traceback.print_exc()
         return False
+
+
+def load_point_cloud_from_ply(filename: str = "result.ply"):
+    """
+    Загружает PLY. Разделяет точки на препятствия (Map) и траекторию (Path) по цвету.
+    Зеленый -> Map, Красный -> Path.
+    
+    Returns:
+        tuple: (map_points_ned, path_points_ned)
+    """
+    try:
+        import numpy as np
+        import open3d as o3d
+    except ImportError:
+        return None, None
+        
+    if not os.path.exists(filename):
+        return None, None
+        
+    try:
+        pcd = o3d.io.read_point_cloud(filename)
+        if not pcd.has_points():
+            return None, None
+            
+        points_vis = np.asarray(pcd.points)
+        
+        # Check colors
+        map_indices = []
+        path_indices = []
+        
+        if pcd.has_colors():
+            colors = np.asarray(pcd.colors)
+            # Simple heuristic: Red channel dominants -> Path, Green channel dominants -> Map
+            # Color is RGB [0..1]
+            
+            # Path (Red): R > 0.8, G < 0.2
+            is_red = (colors[:, 0] > 0.5) & (colors[:, 1] < 0.5)
+            # Map (Green): G > 0.5
+            is_green = (colors[:, 1] > 0.5)
+            
+            path_indices = np.where(is_red)[0]
+            map_indices = np.where(is_green | (~is_red & ~is_green))[0] # Fallback: treat others as map
+        else:
+            # No colors -> assume all map
+            map_indices = np.arange(points_vis.shape[0])
+            
+        # Extract and Transform back to NED
+        # NED X = -Vis Z
+        # NED Y = Vis X
+        # NED Z = -Vis Y
+        
+        def to_ned(vis_pts):
+            if vis_pts.size == 0: return np.empty((0,3), dtype=np.float32)
+            ned = np.zeros_like(vis_pts)
+            ned[:, 0] = -vis_pts[:, 2]
+            ned[:, 1] = vis_pts[:, 0]
+            ned[:, 2] = -vis_pts[:, 1]
+            return ned.astype(np.float32)
+
+        map_points = to_ned(points_vis[map_indices]) if len(map_indices) > 0 else None
+        path_points = to_ned(points_vis[path_indices]) if len(path_indices) > 0 else None
+        
+        print(f"[LOAD] Загружено: Map={len(map_indices)}, Path={len(path_indices)}")
+        return map_points, path_points
+        
+    except Exception as e:
+        print(f"[ERROR] Load error: {e}")
+        return None, None
 
 
 def _transform_points_body_to_world(points_body, drone_pos, drone_quat):
@@ -142,8 +255,10 @@ def _transform_points_body_to_world(points_body, drone_pos, drone_quat):
         [2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x*x + y*y)]
     ], dtype=np.float32)
     
-    # Транспонируем для body -> world
-    R = R.T
+    # R - это матрица поворота Body -> World
+    # v_world = R @ v_body
+    # Для массивов точек (N,3) нам нужно pts @ R.T, что эквивалентно (R @ pts.T).T
+    # Поэтому транспонировать R перед умножением НЕ НУЖНО, если мы используем формулу (R @ pts.T).T
     
     # Преобразуем точки: world = R @ body + pos
     drone_position = np.array([
