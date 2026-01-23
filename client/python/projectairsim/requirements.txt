@@ -1,0 +1,4 @@
+wheel
+pytest
+pytest-cov
+-e C:/CORTEXIS/ProjectAirSim/client/python/projectairsim

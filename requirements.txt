@@ -1,0 +1,11 @@
+# Зависимости для lidar_3d_mapping.py и view_ply.py
+# ВАЖНО: Open3D поддерживает только Python 3.8-3.12, не Python 3.13!
+# Используйте Python 3.12 или более раннюю версию для установки этих зависимостей.
+
+numpy>=1.21.0
+open3d>=0.16.0,<0.17.0
+
+# ProjectAirSim package (установить в режиме разработки)
+# Установка: pip install -e ./client/python/projectairsim
+# Или добавить эту строку (раскомментируйте):
+# -e ./client/python/projectairsim
