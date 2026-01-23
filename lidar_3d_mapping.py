@@ -27,6 +27,259 @@ from lidar_mapping.path_tracker import PathTracker
 from lidar_mapping.state import LidarLatest, PoseLatest, ImuLatest
 from lidar_mapping.visualizer import RealtimePointCloudVisualizer
 
+
+class FullPointCloudAccumulator:
+    """
+    Аккумулятор облака точек, который НЕ УДАЛЯЕТ старые данные.
+    В отличие от PointCloudAccumulator (кольцевой буфер), этот класс
+    накапливает ВСЕ точки со всех сканирований для построения полной карты.
+    
+    Для экономии памяти и КАЧЕСТВА карты используются:
+    1. Воксельная фильтрация (downsampling) - удаление дубликатов
+    2. Statistical Outlier Removal (SOR) - удаление шумовых точек
+    3. Фильтрация по расстоянию - удаление слишком далеких/близких точек
+    """
+
+    def __init__(self, voxel_size: float = 0.10, downsample_threshold: int = 500_000,
+                 max_range: float = 30.0, min_range: float = 0.3,
+                 sor_neighbors: int = 20, sor_std_ratio: float = 1.5):
+        """
+        Args:
+            voxel_size: размер вокселя для фильтрации дубликатов (в метрах) - увеличен для чистоты
+            downsample_threshold: порог точек для применения воксельной фильтрации
+            max_range: максимальная дальность точек от дрона (метры)
+            min_range: минимальная дальность (фильтр близких отражений)
+            sor_neighbors: количество соседей для SOR
+            sor_std_ratio: порог стандартного отклонения для SOR
+        """
+        self._lock = threading.Lock()
+        self._chunks: list = []
+        self._total_points = 0
+        self._voxel_size = voxel_size
+        self._downsample_threshold = downsample_threshold
+        self._last_downsample_count = 0
+        self._max_range = max_range
+        self._min_range = min_range
+        self._sor_neighbors = sor_neighbors
+        self._sor_std_ratio = sor_std_ratio
+        self._last_drone_pos = np.array([0.0, 0.0, 0.0])
+        self._filter_count = 0
+
+    def set_drone_position(self, pos: np.ndarray):
+        """Обновляет позицию дрона для фильтрации по расстоянию."""
+        self._last_drone_pos = pos.copy()
+
+    def add_points(self, points_xyz, drone_position=None) -> None:
+        """Добавляет точки в аккумулятор с предварительной фильтрацией."""
+        if points_xyz is None:
+            return
+        if getattr(points_xyz, "size", 0) == 0:
+            return
+        
+        pts = points_xyz.copy()
+        
+        # 1. Фильтрация по расстоянию от дрона (если позиция известна)
+        if drone_position is not None:
+            drone_pos = np.array(drone_position)
+            self._last_drone_pos = drone_pos
+            dists = np.linalg.norm(pts - drone_pos, axis=1)
+            mask = (dists >= self._min_range) & (dists <= self._max_range)
+            pts = pts[mask]
+            
+        if pts.shape[0] == 0:
+            return
+        
+        # 2. Удаление NaN/Inf значений
+        valid_mask = np.all(np.isfinite(pts), axis=1)
+        pts = pts[valid_mask]
+        
+        if pts.shape[0] == 0:
+            return
+        
+        with self._lock:
+            self._chunks.append(pts)
+            self._total_points += int(pts.shape[0])
+            
+            # Применяем фильтрацию чаще для поддержания чистоты карты
+            if self._total_points > self._downsample_threshold and \
+               self._total_points > self._last_downsample_count * 1.3:
+                self._apply_full_filter_locked()
+
+    def _apply_voxel_filter(self, pts: np.ndarray) -> np.ndarray:
+        """Воксельная фильтрация: оставляет центроид каждого вокселя."""
+        if pts.shape[0] == 0:
+            return pts
+            
+        # Вычисляем индексы вокселей
+        voxel_indices = np.floor(pts / self._voxel_size).astype(np.int64)
+        
+        # Создаем уникальный ключ для каждого вокселя
+        P1, P2 = 73856093, 19349663
+        keys = voxel_indices[:, 0] * P1 + voxel_indices[:, 1] * P2 + voxel_indices[:, 2]
+        
+        # Находим уникальные ключи
+        unique_keys, inverse_indices = np.unique(keys, return_inverse=True)
+        
+        # Вычисляем центроид каждого вокселя (среднее значение точек в вокселе)
+        # Это дает более точную позицию, чем просто первая точка
+        n_voxels = len(unique_keys)
+        centroids = np.zeros((n_voxels, 3), dtype=np.float32)
+        counts = np.zeros(n_voxels, dtype=np.int32)
+        
+        for i in range(3):
+            np.add.at(centroids[:, i], inverse_indices, pts[:, i])
+        np.add.at(counts, inverse_indices, 1)
+        
+        # Делим на количество точек для получения среднего
+        centroids /= counts[:, np.newaxis]
+        
+        return centroids.astype(np.float32)
+
+    def _apply_statistical_outlier_removal(self, pts: np.ndarray) -> np.ndarray:
+        """Удаляет выбросы на основе расстояния до соседей (Statistical Outlier Removal)."""
+        if pts.shape[0] < self._sor_neighbors + 1:
+            return pts
+            
+        try:
+            from scipy.spatial import cKDTree
+            
+            # Строим KD-дерево
+            tree = cKDTree(pts)
+            
+            # Находим k ближайших соседей для каждой точки
+            distances, _ = tree.query(pts, k=self._sor_neighbors + 1)  # +1 потому что точка сама себе сосед
+            
+            # Средняя дистанция до соседей (исключаем первого - это сама точка)
+            mean_dists = np.mean(distances[:, 1:], axis=1)
+            
+            # Глобальное среднее и стандартное отклонение
+            global_mean = np.mean(mean_dists)
+            global_std = np.std(mean_dists)
+            
+            # Порог: mean + std_ratio * std
+            threshold = global_mean + self._sor_std_ratio * global_std
+            
+            # Оставляем только точки с дистанцией ниже порога
+            mask = mean_dists < threshold
+            return pts[mask]
+            
+        except ImportError:
+            # Если scipy недоступен, пропускаем SOR
+            return pts
+        except Exception as e:
+            print(f"[ACCUMULATOR] SOR ошибка: {e}")
+            return pts
+
+    def _apply_radius_outlier_removal(self, pts: np.ndarray, radius: float = 0.3, min_neighbors: int = 5) -> np.ndarray:
+        """Удаляет изолированные точки без достаточного количества соседей в радиусе."""
+        if pts.shape[0] < min_neighbors:
+            return pts
+            
+        try:
+            from scipy.spatial import cKDTree
+            
+            tree = cKDTree(pts)
+            # Считаем количество соседей в радиусе
+            neighbors_count = tree.query_ball_point(pts, r=radius, return_length=True)
+            
+            # Оставляем точки с достаточным количеством соседей
+            mask = neighbors_count >= min_neighbors
+            return pts[mask]
+            
+        except ImportError:
+            return pts
+        except Exception as e:
+            print(f"[ACCUMULATOR] Radius filter ошибка: {e}")
+            return pts
+
+    def _apply_full_filter_locked(self):
+        """Применяет полный набор фильтров (вызывать с lock!)."""
+        try:
+            if len(self._chunks) == 0:
+                return
+                
+            # Объединяем все чанки
+            all_pts = np.concatenate(self._chunks, axis=0)
+            old_count = all_pts.shape[0]
+            
+            self._filter_count += 1
+            
+            # 1. Воксельная фильтрация (всегда)
+            filtered_pts = self._apply_voxel_filter(all_pts)
+            after_voxel = filtered_pts.shape[0]
+            
+            # 2. Statistical Outlier Removal (каждые 3 итерации для производительности)
+            if self._filter_count % 3 == 0 and filtered_pts.shape[0] > 1000:
+                filtered_pts = self._apply_statistical_outlier_removal(filtered_pts)
+                after_sor = filtered_pts.shape[0]
+            else:
+                after_sor = filtered_pts.shape[0]
+            
+            # 3. Radius outlier removal (каждые 5 итераций)
+            if self._filter_count % 5 == 0 and filtered_pts.shape[0] > 1000:
+                filtered_pts = self._apply_radius_outlier_removal(filtered_pts, radius=0.25, min_neighbors=4)
+            
+            # Заменяем все чанки одним отфильтрованным
+            self._chunks = [filtered_pts]
+            self._total_points = filtered_pts.shape[0]
+            self._last_downsample_count = self._total_points
+            
+            reduction_pct = 100 * (1 - self._total_points / old_count) if old_count > 0 else 0
+            print(f"[ACCUMULATOR] Фильтрация #{self._filter_count}: {old_count} -> voxel:{after_voxel} -> sor:{after_sor} -> final:{self._total_points} (сокращение {reduction_pct:.1f}%)")
+            
+        except Exception as e:
+            print(f"[ACCUMULATOR] Ошибка фильтрации: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def force_cleanup(self):
+        """Принудительная очистка с полным набором фильтров."""
+        with self._lock:
+            if self._total_points > 0:
+                print("[ACCUMULATOR] Принудительная очистка...")
+                # Временно устанавливаем более агрессивные параметры
+                old_sor_ratio = self._sor_std_ratio
+                self._sor_std_ratio = 1.0  # Более агрессивно
+                self._filter_count = 14  # Чтобы все фильтры сработали
+                self._apply_full_filter_locked()
+                self._sor_std_ratio = old_sor_ratio
+
+    def snapshot(self, max_points: int = None, apply_final_filter: bool = False):
+        """Возвращает копию всех накопленных точек."""
+        with self._lock:
+            if self._total_points <= 0 or len(self._chunks) == 0:
+                return np.empty((0, 3), dtype=np.float32)
+
+            pts = np.concatenate(self._chunks, axis=0)
+            
+            # Опционально применяем финальную фильтрацию при сохранении
+            if apply_final_filter and pts.shape[0] > 1000:
+                # Финальный SOR с агрессивными параметрами
+                pts = self._apply_statistical_outlier_removal(pts)
+                pts = self._apply_radius_outlier_removal(pts, radius=0.2, min_neighbors=3)
+            
+            if max_points is not None and pts.shape[0] > max_points:
+                # Случайная подвыборка для отображения
+                idx = np.random.choice(pts.shape[0], size=int(max_points), replace=False)
+                pts = pts[idx]
+            
+            return pts
+    
+    def get_total_points(self) -> int:
+        """Возвращает общее количество накопленных точек."""
+        with self._lock:
+            return self._total_points
+    
+    def get_stats(self) -> dict:
+        """Возвращает статистику аккумулятора."""
+        with self._lock:
+            return {
+                "total_points": self._total_points,
+                "chunks": len(self._chunks),
+                "filter_count": self._filter_count,
+                "voxel_size": self._voxel_size
+            }
+
 class PoseHistory:
     """
     Хранит историю поз для точной синхронизации с данными лидара по времени.
@@ -364,31 +617,68 @@ async def hover_and_scan_at_corner(
     pose_latest: PoseLatest,
     acc: PointCloudAccumulator,
     height: float,
-    duration_sec: float = 5.0
+    duration_sec: float = 5.0,
+    rotation_speed: float = 0.5  # радиан/сек (полный оборот ~12.5 сек)
 ):
-    """Зависает на текущей позиции и сканирует (накапливает точки)"""
-    print(f"[SCAN] Сканирование в точке (длительность: {duration_sec}с)...")
+    """
+    Зависает на текущей позиции и выполняет полное вращение на 360 градусов
+    для сканирования всего окружения без мертвых зон.
+    """
+    print(f"[SCAN] Сканирование с вращением 360° в точке...")
     
     # Получаем текущую позицию для удержания
     start_n, start_e = 0.0, 0.0
+    start_yaw = 0.0
     pose_msg, _ = pose_latest.snapshot()
     if pose_msg and isinstance(pose_msg, dict):
         pos = pose_msg.get("position", {})
         start_n = float(pos.get("x", 0.0))
         start_e = float(pos.get("y", 0.0))
+        
+        # Получаем начальный yaw
+        ori = pose_msg.get("orientation", {})
+        q0 = float(ori.get("w", 1.0))
+        q1 = float(ori.get("x", 0.0))
+        q2 = float(ori.get("y", 0.0))
+        q3 = float(ori.get("z", 0.0))
+        start_yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3))
     
+    # Вращаемся на 360 градусов (2*pi радиан)
+    total_rotation = 2 * math.pi
+    rotation_time = total_rotation / rotation_speed  # время для полного оборота
+    
+    dt = 0.1
     start_time = time.time()
-    while time.time() - start_time < duration_sec:
-        # Удерживаем позицию
-        await drone.move_to_position_async(north=start_n, east=start_e, down=height, velocity=1.0)
-        
-        # Вывод прогресса
-        if int(time.time() - start_time) % 2 == 0:
-             print(f"[SCAN] Накоплено точек: {acc._total_points}")
-        
-        await asyncio.sleep(0.5)
+    last_print_time = 0
     
-    print("[SCAN] Сканирование завершено.")
+    while time.time() - start_time < rotation_time:
+        elapsed = time.time() - start_time
+        
+        # Вывод прогресса каждые 2 секунды
+        if int(elapsed) != last_print_time and int(elapsed) % 2 == 0:
+            last_print_time = int(elapsed)
+            rotation_degrees = (elapsed / rotation_time) * 360
+            total_pts = acc.get_total_points() if hasattr(acc, 'get_total_points') else getattr(acc, '_total_points', 0)
+            print(f"[SCAN] Вращение: {rotation_degrees:.0f}°, накоплено точек: {total_pts}")
+        
+        # Команда: удерживаем позицию, вращаемся с постоянной скоростью
+        await drone.move_by_velocity_body_frame_async(
+            v_forward=0.0,
+            v_right=0.0,
+            v_down=0.0,  # Удержание высоты обеспечивается контроллером
+            duration=dt,
+            yaw_is_rate=True,
+            yaw=float(rotation_speed)  # Вращение по часовой стрелке
+        )
+        
+        await asyncio.sleep(dt)
+    
+    # Небольшая пауза после вращения для стабилизации
+    await drone.move_by_velocity_body_frame_async(0, 0, 0, 0.5, yaw_is_rate=True, yaw=0.0)
+    await asyncio.sleep(0.3)
+    
+    total_pts = acc.get_total_points() if hasattr(acc, 'get_total_points') else getattr(acc, '_total_points', 0)
+    print(f"[SCAN] Сканирование завершено. Итого точек: {total_pts}")
 
 async def explore_room_perimeter(
     drone: Drone,
@@ -602,9 +892,11 @@ async def fly_lawnmower_pattern(
     drone: Drone,
     pose_latest: PoseLatest,
     lidar_latest: LidarLatest,
+    acc: PointCloudAccumulator,
     side_length: float,
     height: float,
     velocity: float,
+    scan_duration: float = 5.0,
     spacing: float = 4.0
 ):
     """
@@ -668,6 +960,16 @@ async def fly_lawnmower_pattern(
             avoid_dist=1.5,    # Дистанция начала уклонения
             influence_dist=3.0,
             side_influence_dist=1.0
+        )
+        
+        # Сканирование в точке поворота (90 градусов)
+        # Пользователь: "необходимо, чтобы всякий раз, когда дрон меняет курс на 90 градусов, делалось сканирование"
+        await hover_and_scan_at_corner(
+            drone=drone,
+            pose_latest=pose_latest,
+            acc=acc,
+            height=height,
+            duration_sec=scan_duration
         )
         
     print("[MISSION] Сканирование завершено.")
@@ -736,7 +1038,20 @@ async def main():
 
     # --- КОПИЯ SETUP КОДА ИЗ lidar_mapping/cli.py ---
     client = ProjectAirSimClient()
-    acc = PointCloudAccumulator(max_points=500_000)
+    # Используем FullPointCloudAccumulator для накопления ВСЕХ точек со всех сканирований
+    # с агрессивной фильтрацией для чистой карты:
+    # - voxel_size=0.10м (укрупненные воксели для удаления дубликатов)
+    # - downsample_threshold=300k (частая фильтрация)
+    # - max_range=25м (удаление далеких шумовых точек)
+    # - sor_std_ratio=1.2 (агрессивное удаление выбросов)
+    acc = FullPointCloudAccumulator(
+        voxel_size=0.10,             # Увеличен для чистоты карты
+        downsample_threshold=300_000, # Чаще применять фильтрацию
+        max_range=25.0,              # Максимальная дальность лидара
+        min_range=0.3,               # Минимальная (фильтр близких отражений)
+        sor_neighbors=15,            # Соседей для SOR
+        sor_std_ratio=1.2            # Порог выбросов (ниже = агрессивнее)
+    )
     
     # Инициализация для resume
     existing_path_points = []
@@ -849,6 +1164,10 @@ async def main():
                  if pts.size < 3: return
                  pts_body = np.reshape(pts, (int(pts.shape[0] / 3), 3))
                  
+                 # Минимальное количество точек для добавления (фильтр неполных сканов)
+                 if pts_body.shape[0] < 50:
+                     return
+                 
                  # Получаем timestamp лидара для точной синхронизации
                  lidar_ts = 0.0
                  ts_raw = lidar_data.get("time_stamp")
@@ -869,15 +1188,23 @@ async def main():
                      ori = pose_msg.get("orientation", {})
                      if pos and ori:
                          pts_world = _transform_points_body_to_world(pts_body, pos, ori)
-                         acc.add_points(pts_world)
+                         
+                         # Передаем позицию дрона для фильтрации по дальности
+                         drone_pos = np.array([
+                             float(pos.get("x", 0)),
+                             float(pos.get("y", 0)),
+                             float(pos.get("z", 0))
+                         ])
+                         acc.add_points(pts_world, drone_position=drone_pos)
                          lidar_latest.update(pts_body, stamp=lidar_ts)
                      else:
-                         acc.add_points(pts_body)
+                         # Без позиции не добавляем в карту (только для навигации)
                          lidar_latest.update(pts_body, stamp=lidar_ts)
                  else:
-                     # Если позы нет, используем хотя бы локальные данные для навигации
+                     # Если позы нет, используем только для навигации
                      lidar_latest.update(pts_body, stamp=lidar_ts)
-             except Exception: pass
+             except Exception as e:
+                 pass
 
         try:
             client.subscribe(drone.sensors[args.lidar_name]["lidar"], lambda _, msg: _lidar_callback(msg))
@@ -908,15 +1235,25 @@ async def main():
             drone=drone,
             pose_latest=pose_latest,
             lidar_latest=lidar_latest,
+            acc=acc,
             side_length=args.side_length,
             height=args.height,
             velocity=args.velocity,
+            scan_duration=args.scan_duration,
             spacing=4.0
         )
 
         # --- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ---
-        print("[SAVE] Сохранение результатов...")
-        final_points = acc.snapshot()
+        print("[SAVE] Финальная очистка и сохранение результатов...")
+        
+        # Принудительная финальная очистка перед сохранением
+        acc.force_cleanup()
+        
+        # Получаем точки с финальной фильтрацией
+        final_points = acc.snapshot(apply_final_filter=True)
+        
+        stats = acc.get_stats()
+        print(f"[SAVE] Статистика: {stats['total_points']} точек, {stats['filter_count']} итераций фильтрации")
         
         # Получаем траекторию
         final_path = path_tracker.path_points if path_tracker else []
