@@ -688,17 +688,17 @@ async def explore_room_perimeter(
     height: float,
     velocity: float,
     scan_duration: float,
-    target_wall_dist: float = 3.0
+    target_wall_dist: float = 1.0
 ):
     """
     Исследует комнату, следуя вдоль стен (Right-Hand Rule) для построения полной карты.
     Алгоритм:
-    1. Найти ближайшую стену (движение вперед).
-    2. Следовать вдоль стены, держа её справа на расстоянии ~3.0м.
-    3. Огибать углы (внутренние и внешние).
+    1. Найти ближайшую стену (сканирование 360).
+    2. Долететь до нее на расстояние target_wall_dist.
+    3. Следовать вдоль стены, держа её справа.
     4. Завершить при возврате в исходную точку.
     """
-    print(f"[MISSION] Начинаю исследование периметра (высота: {-height}м, стена справа)...")
+    print(f"[MISSION] Начинаю исследование периметра (высота: {-height}м, расстояние до стены: {target_wall_dist}м)...")
     
     # --- Helper: Get Lidar Stats ---
     def get_lidar_stats():
@@ -782,22 +782,27 @@ async def explore_room_perimeter(
         yaw_rate_cmd = 0.0
         
         if state == "FIND_WALL":
-            # If wall detected near
-            if d_front < target_wall_dist or d_right < target_wall_dist:
-                print(f"[MISSION] Стена обнаружена (F:{d_front:.1f}, R:{d_right:.1f}). Переход к огибанию.")
-                state = "FOLLOW_WALL"
-                wall_following_start_pos = curr_pos
-                wall_following_start_time = time.time()
-                total_dist_traveled = 0.0 # Reset distance counter for perimeter
-                await drone.move_by_velocity_body_frame_async(0,0,0, 1.0) # Brake
-            else:
-                # Fly Forward looking for wall
-                # TODO: Maybe pick a direction? For now forward is fine if user points drone or random.
-                # Let's fly forward-right to find corner or wall? Just forward.
-                v_fwd_cmd = velocity
-                if int(time.time()) % 2 == 0:
-                    print(f"[MISSION] Поиск стены... (F:{d_front:.1f})")
-                
+            # 1. Сначала ищем ближайшую стену сканированием
+            print("\n[PHASE 1] Поиск ближайшей стены...")
+            wall_dist, wall_angle = await find_nearest_wall_direction(drone, lidar_latest)
+            
+            # 2. Поворот к стене
+            print(f"[PHASE 2] Поворот к стене (угол: {math.degrees(wall_angle):.1f}°)...")
+            await turn_to_yaw(drone, wall_angle, pose_latest)
+            
+            # 3. Летим к стене
+            print(f"[PHASE 3] Движение к стене (целевое расстояние: {target_wall_dist}м)...")
+            await move_towards_wall(drone, pose_latest, lidar_latest, height, target_wall_dist, velocity)
+            
+            # 4. Переходим к огибанию
+            print("[PHASE 4] Переход к огибанию стены.")
+            state = "FOLLOW_WALL"
+            wall_following_start_pos = curr_pos
+            wall_following_start_time = time.time()
+            total_dist_traveled = 0.0
+            await drone.move_by_velocity_body_frame_async(0,0,0, 1.0) # Brake
+            continue # Переходим к следующей итерации цикла уже в новом стейте
+        
         elif state == "FOLLOW_WALL":
             # Loop Closure Check
             if wall_following_start_pos is not None and curr_pos is not None:
@@ -811,24 +816,23 @@ async def explore_room_perimeter(
             # --- Wall Following Logic (Right Hand) ---
             
             # 1. Blocked Front -> Turn Left
-            if d_front < 2.5:
+            if d_front < target_wall_dist + 0.5:
                 # print(f"[NAV] Блок спереди ({d_front:.1f}) -> Поворот влево")
                 v_fwd_cmd = 0.0
                 yaw_rate_cmd = -0.5 # Turn Left (CCW)
                 
             # 2. Lost Right Wall (Corner?) -> Turn Right to find it
-            # Increase threshold to avoid false positives on irregular walls
-            elif d_right > target_wall_dist * 2.0:
+            elif d_right > target_wall_dist * 2.5:
                 # print(f"[NAV] Потеря стены справа ({d_right:.1f}) -> Поворот вправо")
-                v_fwd_cmd = velocity * 0.5
+                v_fwd_cmd = velocity * 0.4
                 yaw_rate_cmd = 0.4 # Turn Right (CW)
-                v_right_cmd = 0.5  # Strafe Right slightly
+                v_right_cmd = 0.3  # Strafe Right slightly
                 
             # 3. Too Close to Right Wall -> Strafe Left
-            elif d_right < 1.5:
+            elif d_right < target_wall_dist * 0.5:
                 # print(f"[NAV] Слишком близко справа ({d_right:.1f}) -> Отход влево")
                 v_fwd_cmd = velocity * 0.5
-                v_right_cmd = -1.0 # Strafe Left aggressive
+                v_right_cmd = -0.8 # Strafe Left
                 yaw_rate_cmd = -0.1 # Slight turn left
                 
             # 4. Normal Following
@@ -888,91 +892,419 @@ async def explore_room_perimeter(
     await drone.move_to_position_async(current_n, current_e, -1.0, 1.0)
     await asyncio.sleep(1.0)
 
-async def fly_lawnmower_pattern(
+async def find_nearest_wall_direction(
     drone: Drone,
-    pose_latest: PoseLatest,
     lidar_latest: LidarLatest,
-    acc: PointCloudAccumulator,
-    side_length: float,
+    rotation_speed: float = 0.5
+) -> tuple:
+    """
+    Вращается на 360° для определения ближайшей стены.
+    Возвращает (min_distance, angle_to_wall) - расстояние и угол к ближайшей стене.
+    """
+    print("[SCAN] Поиск ближайшей стены (вращение 360°)...")
+    
+    min_distance = 999.0
+    min_angle = 0.0  # Угол к ближайшей стене (в world frame yaw)
+    
+    total_rotation = 2 * math.pi
+    rotation_time = total_rotation / rotation_speed
+    
+    dt = 0.1
+    start_time = time.time()
+    
+    # Получаем начальный yaw
+    start_yaw = 0.0
+    
+    while time.time() - start_time < rotation_time:
+        elapsed = time.time() - start_time
+        current_rotation = elapsed * rotation_speed  # Сколько повернулись
+        
+        # Получаем данные лидара
+        pts, _ = lidar_latest.snapshot()
+        
+        if pts is not None and pts.size > 0:
+            # Фильтруем точки по высоте (на уровне дрона ±0.5м)
+            mask_z = np.abs(pts[:, 2]) < 0.5
+            pts_plane = pts[mask_z]
+            
+            if pts_plane.size > 0:
+                # Расстояния и углы в body frame
+                dists = np.linalg.norm(pts_plane[:, :2], axis=1)
+                angles = np.arctan2(pts_plane[:, 1], pts_plane[:, 0])
+                
+                # Смотрим только вперед (±30°)
+                mask_front = np.abs(angles) < math.radians(30)
+                
+                if np.any(mask_front):
+                    front_dists = dists[mask_front]
+                    min_front_dist = np.min(front_dists)
+                    
+                    if min_front_dist < min_distance:
+                        min_distance = min_front_dist
+                        # Угол к стене = начальный yaw + сколько повернулись
+                        min_angle = start_yaw + current_rotation
+                        
+                        # Нормализация угла
+                        while min_angle > math.pi: min_angle -= 2*math.pi
+                        while min_angle < -math.pi: min_angle += 2*math.pi
+        
+        # Вращаемся
+        await drone.move_by_velocity_body_frame_async(
+            v_forward=0.0,
+            v_right=0.0,
+            v_down=0.0,
+            duration=dt,
+            yaw_is_rate=True,
+            yaw=float(rotation_speed)
+        )
+        
+        await asyncio.sleep(dt)
+    
+    # Остановка после вращения
+    await drone.move_by_velocity_body_frame_async(0, 0, 0, 0.3, yaw_is_rate=True, yaw=0.0)
+    await asyncio.sleep(0.2)
+    
+    print(f"[SCAN] Ближайшая стена: {min_distance:.2f}м под углом {math.degrees(min_angle):.1f}°")
+    
+    return min_distance, min_angle
+
+
+async def turn_to_yaw(drone: Drone, target_yaw: float, pose_latest, tolerance: float = 0.1):
+    """Поворачивается к заданному углу yaw (в радианах)."""
+    dt = 0.1
+    timeout = 10.0
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        pose_msg, _ = pose_latest.snapshot()
+        if not pose_msg:
+            await asyncio.sleep(dt)
+            continue
+            
+        ori = pose_msg.get("orientation", {})
+        q0 = float(ori.get("w", 1.0))
+        q1 = float(ori.get("x", 0.0))
+        q2 = float(ori.get("y", 0.0))
+        q3 = float(ori.get("z", 0.0))
+        current_yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3))
+        
+        yaw_err = target_yaw - current_yaw
+        while yaw_err > math.pi: yaw_err -= 2*math.pi
+        while yaw_err < -math.pi: yaw_err += 2*math.pi
+        
+        if abs(yaw_err) < tolerance:
+            break
+            
+        yaw_rate = np.clip(yaw_err * 1.5, -1.0, 1.0)
+        
+        await drone.move_by_velocity_body_frame_async(
+            v_forward=0.0,
+            v_right=0.0,
+            v_down=0.0,
+            duration=dt,
+            yaw_is_rate=True,
+            yaw=float(yaw_rate)
+        )
+        await asyncio.sleep(dt)
+    
+    # Остановка
+    await drone.move_by_velocity_body_frame_async(0, 0, 0, 0.2, yaw_is_rate=True, yaw=0.0)
+
+
+async def get_current_yaw(pose_latest) -> float:
+    """Получает текущий yaw дрона."""
+    pose_msg, _ = pose_latest.snapshot()
+    if not pose_msg:
+        return 0.0
+    ori = pose_msg.get("orientation", {})
+    q0 = float(ori.get("w", 1.0))
+    q1 = float(ori.get("x", 0.0))
+    q2 = float(ori.get("y", 0.0))
+    q3 = float(ori.get("z", 0.0))
+    return math.atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3))
+
+
+async def move_towards_wall(
+    drone: Drone,
+    pose_latest,
+    lidar_latest: LidarLatest,
     height: float,
-    velocity: float,
-    scan_duration: float = 5.0,
-    spacing: float = 4.0
+    target_distance: float = 0.5,
+    velocity: float = 1.0
+) -> bool:
+    """
+    Движется вперед к стене, пока расстояние не станет target_distance.
+    Возвращает True если достигли стены.
+    """
+    print(f"[NAV] Движение к стене (целевое расстояние: {target_distance}м)...")
+    
+    dt = 0.1
+    timeout = 60.0
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        # Получаем расстояние до стены спереди
+        pts, _ = lidar_latest.snapshot()
+        front_dist = 999.0
+        
+        if pts is not None and pts.size > 0:
+            mask_z = np.abs(pts[:, 2]) < 0.5
+            pts_plane = pts[mask_z]
+            
+            if pts_plane.size > 0:
+                dists = np.linalg.norm(pts_plane[:, :2], axis=1)
+                angles = np.arctan2(pts_plane[:, 1], pts_plane[:, 0])
+                
+                # Спереди (±30°)
+                mask_front = np.abs(angles) < math.radians(30)
+                if np.any(mask_front):
+                    front_dist = np.min(dists[mask_front])
+        
+        # Проверяем достижение цели (с небольшим запасом)
+        if front_dist <= target_distance + 0.1:
+            print(f"[NAV] Достигли стены ({front_dist:.2f}м)")
+            await drone.move_by_velocity_body_frame_async(0, 0, 0, 0.5, yaw_is_rate=True, yaw=0.0)
+            await asyncio.sleep(0.3)
+            return True
+        
+        # Скорость движения (замедляемся при приближении - начинаем раньше)
+        speed = velocity
+        if front_dist < 3.0:  # Начинаем замедление раньше
+            speed = velocity * (front_dist - target_distance) / (3.0 - target_distance)
+            speed = max(0.2, min(speed, velocity))  # Минимум 0.2 м/с
+        
+        # Управление высотой
+        pose_msg, _ = pose_latest.snapshot()
+        cur_z = 0.0
+        if pose_msg:
+            cur_z = float(pose_msg.get("position", {}).get("z", 0))
+        dz = height - cur_z
+        vz_cmd = np.clip(dz, -1.0, 1.0)
+        
+        await drone.move_by_velocity_body_frame_async(
+            v_forward=float(speed),
+            v_right=0.0,
+            v_down=float(vz_cmd),
+            duration=dt,
+            yaw_is_rate=True,
+            yaw=0.0
+        )
+        
+        await asyncio.sleep(dt)
+    
+    print("[NAV] Таймаут движения к стене")
+    return False
+
+
+async def follow_wall_until_corner(
+    drone: Drone,
+    pose_latest,
+    lidar_latest: LidarLatest,
+    height: float,
+    wall_distance: float = 0.5,
+    velocity: float = 1.0
+) -> bool:
+    """
+    Следует вдоль стены (стена справа) пока не достигнет угла (стена спереди на 0.5м).
+    Возвращает True если достигли угла.
+    """
+    print(f"[NAV] Следование вдоль стены (стена справа на {wall_distance}м)...")
+    
+    dt = 0.1
+    timeout = 120.0
+    start_time = time.time()
+    
+    kp_lateral = 2.0  # Коэффициент для коррекции бокового положения
+    
+    while time.time() - start_time < timeout:
+        # Получаем расстояния
+        pts, _ = lidar_latest.snapshot()
+        front_dist = 999.0
+        right_dist = 999.0
+        
+        if pts is not None and pts.size > 0:
+            mask_z = np.abs(pts[:, 2]) < 0.5
+            pts_plane = pts[mask_z]
+            
+            if pts_plane.size > 0:
+                dists = np.linalg.norm(pts_plane[:, :2], axis=1)
+                angles = np.arctan2(pts_plane[:, 1], pts_plane[:, 0])
+                
+                # Спереди (±30°)
+                mask_front = np.abs(angles) < math.radians(30)
+                if np.any(mask_front):
+                    front_dist = np.min(dists[mask_front])
+                
+                # Справа (60°..120°) - Y+ в body frame = право
+                mask_right = (angles > math.radians(60)) & (angles < math.radians(120))
+                if np.any(mask_right):
+                    right_dist = np.min(dists[mask_right])
+        
+        # Проверяем достижение угла (стена спереди) - с запасом
+        if front_dist <= wall_distance + 0.2:
+            print(f"[NAV] Достигли угла (стена спереди: {front_dist:.2f}м)")
+            await drone.move_by_velocity_body_frame_async(0, 0, 0, 0.5, yaw_is_rate=True, yaw=0.0)
+            await asyncio.sleep(0.3)
+            return True
+        
+        # Управление боковой позицией (держим расстояние до правой стены)
+        v_right = 0.0
+        if right_dist < 999.0:
+            err = wall_distance - right_dist  # Если слишком близко (err > 0), двигаемся влево
+            v_right = np.clip(-err * kp_lateral, -0.3, 0.3)  # Уменьшена боковая скорость
+        
+        # Скорость вперед (замедление при приближении к углу - начинаем раньше)
+        v_fwd = velocity
+        if front_dist < 4.0:  # Начинаем замедление раньше
+            v_fwd = velocity * (front_dist - wall_distance) / (4.0 - wall_distance)
+            v_fwd = max(0.2, min(v_fwd, velocity))  # Минимум 0.2 м/с
+        
+        # Управление высотой
+        pose_msg, _ = pose_latest.snapshot()
+        cur_z = 0.0
+        if pose_msg:
+            cur_z = float(pose_msg.get("position", {}).get("z", 0))
+        dz = height - cur_z
+        vz_cmd = np.clip(dz, -1.0, 1.0)
+        
+        # Вывод статуса
+        if int(time.time() * 2) % 4 == 0:
+            print(f"[NAV] Фронт: {front_dist:.1f}м, Право: {right_dist:.1f}м, vR: {v_right:.2f}")
+        
+        await drone.move_by_velocity_body_frame_async(
+            v_forward=float(v_fwd),
+            v_right=float(v_right),
+            v_down=float(vz_cmd),
+            duration=dt,
+            yaw_is_rate=True,
+            yaw=0.0
+        )
+        
+        await asyncio.sleep(dt)
+    
+    print("[NAV] Таймаут следования вдоль стены")
+    return False
+
+
+async def fly_wall_following_pattern(
+    drone: Drone,
+    pose_latest,
+    lidar_latest: LidarLatest,
+    acc,
+    height: float,
+    wall_distance: float = 0.5,
+    velocity: float = 1.0,
+    scan_duration: float = 5.0
 ):
     """
-    Облет территории по траектории 'змейка' (Lawnmower pattern) для покрытия площади,
-    включая проходы между стеллажами.
+    Алгоритм облета по стенам:
+    1. Вращение на 360° для поиска ближайшей стены
+    2. Движение к стене
+    3. При достижении 0.5м - поворот направо на 90°
+    4. Следование вдоль стены до следующего угла
+    5. Повтор до нахождения 4 углов
+    6. Возврат в исходную точку и посадка
+    В каждом углу - сканирование на 360°
     """
-    print(f"[MISSION] Запуск сканирования 'змейкой'. Область: {side_length}x{side_length}м")
+    print(f"[MISSION] Запуск облета по стенам (высота: {-height}м, расстояние до стены: {wall_distance}м)")
     
-    # Определяем начальную точку
-    start_n, start_e = 0.0, 0.0
+    # Сохраняем начальную позицию
+    start_pos = None
+    for _ in range(20):
+        pose_msg, _ = pose_latest.snapshot()
+        if pose_msg:
+            p = pose_msg.get("position", {})
+            start_pos = np.array([float(p.get("x", 0)), float(p.get("y", 0))])
+            break
+        await asyncio.sleep(0.1)
+    
+    if start_pos is None:
+        print("[ERROR] Не удалось получить начальную позицию!")
+        return
+    
+    print(f"[MISSION] Начальная позиция: ({start_pos[0]:.2f}, {start_pos[1]:.2f})")
+    
+    # 1. Первоначальное сканирование и поиск ближайшей стены
+    print("\n[PHASE 1] Поиск ближайшей стены...")
+    wall_dist, wall_angle = await find_nearest_wall_direction(drone, lidar_latest)
+    
+    # 2. Поворот к ближайшей стене
+    print(f"\n[PHASE 2] Поворот к стене (угол: {math.degrees(wall_angle):.1f}°)...")
+    await turn_to_yaw(drone, wall_angle, pose_latest)
+    
+    # 3. Движение к стене
+    print("\n[PHASE 3] Движение к стене...")
+    await move_towards_wall(drone, pose_latest, lidar_latest, height, wall_distance, velocity)
+    
+    # 4. Сканирование в первом углу
+    print("\n[CORNER 0] Сканирование...")
+    await hover_and_scan_at_corner(drone, pose_latest, acc, height, scan_duration)
+    
+    corners_found = 0
+    max_corners = 4
+    
+    while corners_found < max_corners:
+        corners_found += 1
+        print(f"\n[CORNER {corners_found}] Поворот направо на 90°...")
+        
+        # Поворот направо на 90°
+        current_yaw = await get_current_yaw(pose_latest)
+        new_yaw = current_yaw + math.pi / 2  # +90° по часовой стрелке
+        while new_yaw > math.pi: new_yaw -= 2*math.pi
+        await turn_to_yaw(drone, new_yaw, pose_latest)
+        
+        # Следование вдоль стены до следующего угла
+        print(f"\n[WALL {corners_found}] Следование вдоль стены...")
+        corner_reached = await follow_wall_until_corner(
+            drone, pose_latest, lidar_latest, height, wall_distance, velocity
+        )
+        
+        if corner_reached:
+            # Сканирование в углу
+            print(f"\n[CORNER {corners_found}] Сканирование...")
+            await hover_and_scan_at_corner(drone, pose_latest, acc, height, scan_duration)
+        else:
+            print(f"[WARN] Угол {corners_found} не достигнут, продолжаем...")
+    
+    print("\n[PHASE 5] Возврат в исходную точку...")
+    
+    # Получаем текущую позицию
     pose_msg, _ = pose_latest.snapshot()
     if pose_msg:
-        pos = pose_msg.get("position", {})
-        start_n = float(pos.get("x", 0.0))
-        start_e = float(pos.get("y", 0.0))
+        current_pos = pose_msg.get("position", {})
+        current_n = float(current_pos.get("x", 0))
+        current_e = float(current_pos.get("y", 0))
         
-    # Генерируем точки. 
-    # Покроем квадрат от текущей позиции:
-    # North: [start_n, start_n + side_length]
-    # East:  [start_e - side_length/2, start_e + side_length/2]
+        # Поворачиваемся к начальной точке
+        dn = start_pos[0] - current_n
+        de = start_pos[1] - current_e
+        target_yaw = math.atan2(de, dn)
+        await turn_to_yaw(drone, target_yaw, pose_latest)
     
-    half_width = side_length / 2
+    # Летим к начальной точке с избеганием препятствий
+    await fly_to_point_with_avoidance(
+        drone=drone,
+        target_n=start_pos[0],
+        target_e=start_pos[1],
+        height=height,
+        pose_latest=pose_latest,
+        lidar_latest=lidar_latest,
+        cruise_speed=velocity,
+        stop_dist=0.5
+    )
     
-    # Формируем линии по East с шагом spacing
-    e_steps = np.arange(-half_width, half_width + spacing, spacing)
+    print("\n[PHASE 6] Плавное снижение...")
     
-    waypoints = []
+    # Плавное снижение (на высоту 1м сначала)
+    pose_msg, _ = pose_latest.snapshot()
+    if pose_msg:
+        p = pose_msg.get("position", {})
+        current_n = float(p.get("x", 0))
+        current_e = float(p.get("y", 0))
+        await drone.move_to_position_async(current_n, current_e, -1.0, 1.0)
+        await asyncio.sleep(1.0)
     
-    for i, e_offset in enumerate(e_steps):
-        # Координата E для этой линии
-        target_e = start_e + e_offset
-        
-        # Координаты N: туда (0 -> side) или обратно (side -> 0)
-        if i % 2 == 0:
-            n_start = start_n
-            n_end = start_n + side_length
-        else:
-            n_start = start_n + side_length
-            n_end = start_n
-            
-        # Добавляем точки
-        # 1. Сдвиг по E на стартовом N (переход к новой линии)
-        waypoints.append((n_start, target_e))
-        # 2. Проход по линии до конечного N
-        waypoints.append((n_end, target_e))
-
-    print(f"[MISSION] Сформировано {len(waypoints)} точек маршрута.")
-
-    for idx, (wp_n, wp_e) in enumerate(waypoints):
-        print(f"[MISSION] Точка {idx+1}/{len(waypoints)}: ({wp_n:.1f}, {wp_e:.1f})")
-        
-        await fly_to_point_with_avoidance(
-            drone=drone,
-            target_n=wp_n,
-            target_e=wp_e,
-            height=height,
-            pose_latest=pose_latest,
-            lidar_latest=lidar_latest,
-            cruise_speed=velocity,
-            stop_dist=0.5,     # Точность прибытия
-            avoid_dist=1.5,    # Дистанция начала уклонения
-            influence_dist=3.0,
-            side_influence_dist=1.0
-        )
-        
-        # Сканирование в точке поворота (90 градусов)
-        # Пользователь: "необходимо, чтобы всякий раз, когда дрон меняет курс на 90 градусов, делалось сканирование"
-        await hover_and_scan_at_corner(
-            drone=drone,
-            pose_latest=pose_latest,
-            acc=acc,
-            height=height,
-            duration_sec=scan_duration
-        )
-        
-    print("[MISSION] Сканирование завершено.")
+    print("[MISSION] Облет по стенам завершен!")
 
 class SafePathTracker(PathTracker):
     """
@@ -1223,24 +1555,16 @@ async def main():
         await drone.move_to_position_async(north=0, east=0, down=args.height, velocity=2.0)
         await asyncio.sleep(2.0)
 
-        # Выполнение миссии
-        # await explore_room_perimeter(
-        #     drone, pose_latest, lidar_latest, acc, 
-        #     height=args.height, 
-        #     velocity=args.velocity,
-        #     scan_duration=args.scan_duration
-        # )
-        
-        await fly_lawnmower_pattern(
+        # Выполнение миссии - исследование периметра
+        await explore_room_perimeter(
             drone=drone,
             pose_latest=pose_latest,
             lidar_latest=lidar_latest,
             acc=acc,
-            side_length=args.side_length,
             height=args.height,
-            velocity=args.velocity,
+            velocity=1.0,       # Уменьшенная скорость для безопасного облета
             scan_duration=args.scan_duration,
-            spacing=4.0
+            target_wall_dist=1.0 # Расстояние до стены (было 3.0)
         )
 
         # --- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ---
